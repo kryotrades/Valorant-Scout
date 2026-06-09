@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+backend/.env
+.env
+
+# Local data (encounter ledger, etc.)
+backend/data/
+
+# Per-user launcher markers (created by install.bat / start.bat)
+.scout/
+
+# Node / Next
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+npm-debug.log*
+
+# Reference clones (logic already integrated into backend/)
+vendor/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code local config
+.claude/
+node_modules_bak/

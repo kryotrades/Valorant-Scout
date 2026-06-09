@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="Valorant Scout">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0A0A0C"/>
+      <stop offset="1" stop-color="#15090B"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FF4655"/>
+      <stop offset="1" stop-color="#D13B47"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.1" r="0.9">
+      <stop offset="0" stop-color="#FF4655" stop-opacity="0.22"/>
+      <stop offset="0.6" stop-color="#FF4655" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <rect width="1200" height="300" fill="url(#grid)"/>
+  <rect width="1200" height="300" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1200" height="4" fill="url(#red)"/>
+  <rect x="0" y="296" width="1200" height="4" fill="url(#red)"/>
+
+  <!-- crosshair mark -->
+  <g transform="translate(150 150)" stroke="#FF4655" stroke-width="6" fill="none" stroke-linecap="round">
+    <circle r="54" stroke-opacity="0.35"/>
+    <line x1="-86" y1="0" x2="-30" y2="0"/>
+    <line x1="30" y1="0" x2="86" y2="0"/>
+    <line x1="0" y1="-86" x2="0" y2="-30"/>
+    <line x1="0" y1="30" x2="0" y2="86"/>
+    <circle r="7" fill="#FF4655" stroke="none"/>
+  </g>
+
+  <text x="270" y="150" font-family="'Segoe UI',Arial,sans-serif" font-size="78" font-weight="800" letter-spacing="2">
+    <tspan fill="#F4F4F5">VALORANT</tspan> <tspan fill="#FF4655">SCOUT</tspan>
+  </text>
+  <text x="272" y="194" font-family="'Consolas','Courier New',monospace" font-size="21" letter-spacing="2" fill="#8B8B92">
+    live recon · ranks · smurf radar · instalock · ascii art
+  </text>
+  <text x="272" y="228" font-family="'Segoe UI',Arial,sans-serif" font-size="16" letter-spacing="1" fill="#5C5C63">
+    Flask + Next.js + Rich CLI — reads the local VALORANT client
+  </text>
+</svg>
