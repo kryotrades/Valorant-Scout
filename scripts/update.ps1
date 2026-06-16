@@ -1,4 +1,4 @@
-# update.ps1 — manual full update (run via UPDATE.bat); also called by start.ps1.
+﻿# update.ps1 — manual full update (run via UPDATE.bat); also called by start.ps1.
 . (Join-Path $PSScriptRoot "common.ps1")
 
 Write-Host ""

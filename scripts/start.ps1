@@ -1,4 +1,4 @@
-# start.ps1 — everyday launcher for Valorant Scout (run via start.bat).
+﻿# start.ps1 — everyday launcher for Valorant Scout (run via start.bat).
 . (Join-Path $PSScriptRoot "common.ps1")
 
 if (-not (Is-Installed)) {

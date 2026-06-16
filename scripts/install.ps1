@@ -1,4 +1,4 @@
-# install.ps1 — one-time setup for Valorant Scout (run via install.bat).
+﻿# install.ps1 — one-time setup for Valorant Scout (run via install.bat).
 . (Join-Path $PSScriptRoot "common.ps1")
 
 Write-Host ""
