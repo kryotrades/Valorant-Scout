@@ -6,9 +6,9 @@
 
 **Live in-match intelligence for VALORANT — see every player's rank, peak, K/D, win-rate, smurf risk, full skin inventory and party before the round even starts.**
 
-[![License: GPL v3](https://img.shields.io/github/license/kryotrades/Valorant-Scout?color=FF4655&style=flat-square)](LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/kryotrades/Valorant-Scout?color=FF4655&style=flat-square)](https://github.com/kryotrades/Valorant-Scout/releases)
-[![Stars](https://img.shields.io/github/stars/kryotrades/Valorant-Scout?color=FF4655&style=flat-square)](https://github.com/kryotrades/Valorant-Scout/stargazers)
+[![License: GPL v3](https://badgen.net/github/license/kryotrades/Valorant-Scout?color=FF4655)](LICENSE)
+[![Latest tag](https://badgen.net/github/tag/kryotrades/Valorant-Scout?color=FF4655)](https://github.com/kryotrades/Valorant-Scout/releases)
+[![Stars](https://badgen.net/github/stars/kryotrades/Valorant-Scout?color=FF4655)](https://github.com/kryotrades/Valorant-Scout/stargazers)
 [![Live demo](https://img.shields.io/badge/live_demo-valorantscout.vercel.app-FF4655?style=flat-square)](https://valorantscout.vercel.app)
 ![Windows 10/11](https://img.shields.io/badge/Windows_10%2F11-0F1923?style=flat-square&logo=windows&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-0F1923?style=flat-square&logo=nextdotjs&logoColor=white)
