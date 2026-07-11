@@ -1,21 +1,3 @@
-"""
-app.py
-======
-Flask API for the VALORANT companion dashboard.
-
-Routes
-------
-GET  /api/health                 -> liveness + active data source
-GET  /api/agents                 -> canonical agent catalogue (for the grid)
-GET  /api/player/<puuid>         -> full analysed career (stats, rank, party,
-                                    preferred-agent suggestion)
-POST /api/instalock              -> trigger an agent select/lock (dry-run by
-                                    default; live path is ToS-gated)
-
-The heavy lifting lives in riot_client / party_detector / pick_advisor. This
-file only orchestrates them and shapes the JSON response.
-"""
-
 from __future__ import annotations
 
 import json
@@ -29,19 +11,21 @@ from flask_cors import CORS
 try:
     from dotenv import load_dotenv
     load_dotenv()
-except Exception:  # noqa: BLE001 - dotenv optional
+except Exception:
     pass
 
 import discord_presence
 import encounter_log
+import sync
 import pick_advisor
 import live_match
 import party_detector
 import sample_match
+import session_tracker
 from agents import AGENTS, resolve_agent
 from instalock_worker import InstalockWorker
 from riot_client import REGIONS, LocalAuth, RiotClient
-from vconstants import STATES, rank_from_tier
+from vconstants import APP_VERSION, STATES, rank_from_tier
 
 app = Flask(__name__)
 CORS(app)
@@ -49,44 +33,30 @@ CORS(app)
 client = RiotClient()
 instalock_worker = InstalockWorker()
 
-# Tiny TTL cache so pagination / re-renders don't refetch live data.
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = float(os.getenv("PLAYER_CACHE_TTL", "60"))
 
-
-# ---------------------------------------------------------------------------
-# Server-side settings mirror (best-effort)
-# ---------------------------------------------------------------------------
-# A tiny JSON store so the user's panel choices (region/agent/perMap/etc.)
-# survive even if the browser's localStorage is cleared. The frontend remains
-# the source of truth via localStorage; this is just a convenience mirror.
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "data", "settings.json")
 _SETTINGS_LOCK = threading.Lock()
-# Keys we persist (anything else POSTed is ignored).
+
 _SETTINGS_KEYS = {"region", "agent", "mode", "delay", "dryRun", "perMap",
                   "autoRefresh"}
-
 
 def _load_settings() -> dict:
     try:
         with open(_SETTINGS_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001 - missing/corrupt file -> empty settings
+    except Exception:
         return {}
-
 
 def _save_settings(data: dict) -> None:
     os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
     tmp = f"{_SETTINGS_PATH}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
-    os.replace(tmp, _SETTINGS_PATH)  # atomic on the same filesystem
+    os.replace(tmp, _SETTINGS_PATH)
 
-
-# ---------------------------------------------------------------------------
-# Aggregation
-# ---------------------------------------------------------------------------
 def _summarize(matches: list[dict]) -> dict:
     n = len(matches)
     if n == 0:
@@ -111,13 +81,12 @@ def _summarize(matches: list[dict]) -> dict:
         "losses": losses,
     }
 
-
 def _decorate_match(m: dict, suggestion: dict) -> dict:
     meta = resolve_agent(m.get("agent")) or {}
     st = m["stats"]
     kda = round((st["kills"] + st["assists"]) / st["deaths"], 2) if st["deaths"] else float(st["kills"] + st["assists"])
     out = dict(m)
-    out.pop("teammates", None)  # internal; party graph uses coPlayers instead
+    out.pop("teammates", None)
     out["agentMeta"] = {
         "name": meta.get("name", m.get("agent")),
         "role": meta.get("role", "Flex"),
@@ -125,13 +94,12 @@ def _decorate_match(m: dict, suggestion: dict) -> dict:
         "portrait": meta.get("portrait"),
     }
     out["stats"] = {**st, "kda": kda}
-    # Each match carries the preferred-agent suggestion too.
+
     out["pickSuggestion"] = {
         "agent": suggestion.get("agent"),
         "times": suggestion.get("times", 0),
     }
     return out
-
 
 def build_player_payload(puuid: str) -> dict:
     raw = client.get_player_overview(puuid)
@@ -143,7 +111,7 @@ def build_player_payload(puuid: str) -> dict:
     peak = rank_from_tier(raw.get("peakTier"))
 
     decorated = [_decorate_match(m, suggestion) for m in party["matches"]]
-    # Re-attach party flags onto the decorated matches.
+
     for dm, pm in zip(decorated, party["matches"]):
         dm["partyMembers"] = pm.get("partyMembers", [])
 
@@ -166,10 +134,6 @@ def build_player_payload(puuid: str) -> dict:
         "matches": decorated,
     }
 
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 @app.get("/api/health")
 def health():
     return jsonify({
@@ -178,27 +142,23 @@ def health():
         "dataSourcePreference": client.source_pref,
         "officialKey": bool(client.api_key),
         "liveInstalockEnabled": client.allow_live_instalock,
-        # coarse client state; the detailed "restart your game" hint rides on the
-        # live board's `notice` field (see build_live / _client_notice).
+
         "clientStatus": "ok" if LocalAuth.available() else "not_running",
     })
-
 
 @app.get("/api/agents")
 def agents():
     return jsonify({"agents": AGENTS, "count": len(AGENTS)})
 
-
 @app.get("/api/settings")
 def settings_get():
-    """Return the server-side settings mirror (empty dict if never saved)."""
+    pass
     with _SETTINGS_LOCK:
         return jsonify(_load_settings())
 
-
 @app.post("/api/settings")
 def settings_post():
-    """Merge the posted keys into the saved settings and persist them."""
+    pass
     body = request.get_json(silent=True) or {}
     incoming = {k: v for k, v in body.items() if k in _SETTINGS_KEYS}
     with _SETTINGS_LOCK:
@@ -206,37 +166,34 @@ def settings_post():
         merged.update(incoming)
         try:
             _save_settings(merged)
-        except Exception as e:  # noqa: BLE001 - best-effort, never 500 on this
+        except Exception as e:
             app.logger.exception("settings save failed")
             return jsonify({"ok": False, "message": str(e),
                             "settings": merged}), 200
     return jsonify({"ok": True, "settings": merged})
 
-
-# ---------------------------------------------------------------------------
-# Live scoreboard
-# ---------------------------------------------------------------------------
 def _live_enabled() -> bool:
     return client.source_pref != "demo" and LocalAuth.available()
 
-
 def _attach_encounters(board: dict) -> dict:
-    """Tag each player with their cross-session encounter tally (or null).
-
-    Live boards get {withCount, againstCount} from the ledger; demo boards get
-    encounter=null so the UI behaves identically without VALORANT running.
-    """
+    pass
     is_live = board.get("source") == "local"
+    self_team = board.get("selfTeam")
     for p in board.get("players") or []:
         if not isinstance(p, dict):
             continue
-        p["encounter"] = encounter_log.encounter_for(p.get("puuid")) if is_live else None
+        enc = encounter_log.encounter_for(p.get("puuid")) if is_live else None
+
+        if enc:
+            if self_team is not None and p.get("team") == self_team:
+                enc["withCount"] = max(0, enc["withCount"] - 1)
+            else:
+                enc["againstCount"] = max(0, enc["againstCount"] - 1)
+        p["encounter"] = enc
     return board
 
-
 def _client_notice() -> dict:
-    """Friendly hint shown on the website/CLI when the local client can't be read.
-    Distinguishes 'game not running' from 'running but unreadable' (restart)."""
+    pass
     if not LocalAuth.available():
         return {"level": "info", "action": "open_game",
                 "message": "Open VALORANT to see live ranks, parties and stats."}
@@ -244,57 +201,70 @@ def _client_notice() -> dict:
             "message": "Couldn't read VALORANT — please restart your game "
                        "(close it completely and relaunch), then try again."}
 
+_LAST_GOOD = {"board": None, "at": 0.0}
+_HOLD_SECS = 12
 
 def build_live(seed: int = 7, want_state: str | None = None) -> dict:
-    """Live local-client scoreboard, falling back to a demo lobby/match."""
+    pass
     notice = None
     if _live_enabled():
         try:
-            board = live_match.LiveMatch(LocalAuth()).build_scoreboard(
+            lm = live_match.LiveMatch(LocalAuth())
+            board = lm.build_scoreboard(
                 include_stats=os.getenv("LIVE_INCLUDE_STATS", "true").lower() != "false"
             )
             board.setdefault("sourceDetail", "Local VALORANT client")
-            # Fold this board into the cross-session encounter ledger, then tag
-            # each row with its tally — best-effort, never break the response.
+
+            try:
+                session_tracker.observe(board, lm)
+                session_tracker.attach(board)
+            except Exception:
+                app.logger.exception("session tracking failed")
+
             try:
                 encounter_log.record_board(board)
                 _attach_encounters(board)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 app.logger.exception("encounter logging failed")
+            board["appVersion"] = APP_VERSION
+            sync.observe(board)
+            _LAST_GOOD["board"], _LAST_GOOD["at"] = board, time.time()
             return board
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             app.logger.exception("live scoreboard failed")
-            notice = _client_notice()  # game running but unreadable -> restart
+
+            if _LAST_GOOD["board"] and time.time() - _LAST_GOOD["at"] < _HOLD_SECS:
+                return _LAST_GOOD["board"]
+            notice = _client_notice()
             if client.source_pref == "local":
                 return {"state": "OFFLINE", "stateLabel": "Offline", "source": "local",
                         "error": str(e), "players": [], "teams": {}, "parties": [],
-                        "notice": notice}
+                        "notice": notice, "appVersion": APP_VERSION}
     elif client.source_pref != "demo" and not LocalAuth.available():
-        # auto mode, game not running: show demo but hint to open the game.
+
         notice = _client_notice()
-    # Demo fallback — `?state=menus` previews the lobby view.
+
     board = (sample_match.generate_lobby(seed)
              if (want_state or "").lower() == "menus"
              else sample_match.generate(seed))
     board = _attach_encounters(board)
     if notice:
         board["notice"] = notice
+    board["appVersion"] = APP_VERSION
     return board
-
 
 @app.get("/api/state")
 def state():
-    """Lightweight state probe (used for cheap polling)."""
+    pass
     if _live_enabled():
         try:
             lm = live_match.LiveMatch(LocalAuth())
             st = lm.game_state(lm._presences())
             return jsonify({"state": st, "stateLabel": STATES.get(st, st), "source": "local"})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return jsonify({"state": "OFFLINE", "stateLabel": "Offline",
                             "source": "local", "error": str(e)})
     return jsonify({"state": "INGAME", "stateLabel": "In Game", "source": "demo"})
-
 
 @app.get("/api/live")
 def live():
@@ -304,48 +274,55 @@ def live():
         seed = 7
     return jsonify(build_live(seed, request.args.get("state")))
 
-
 @app.get("/api/encounters")
 def encounters():
-    """Cross-session ledger: every player seen, most-encountered first."""
-    return jsonify({"players": encounter_log.get_all()})
+    pass
+    if _live_enabled():
+        return jsonify({"players": encounter_log.get_all()})
+    return jsonify({"players": sample_match.encounters()})
 
+@app.get("/api/recap")
+def recap():
+    pass
+    live_recap = session_tracker.current_recap() if _live_enabled() else None
+    try:
+        seed = int(request.args.get("seed", 7))
+    except (TypeError, ValueError):
+        seed = 7
+    return jsonify(live_recap or sample_match.recap(seed))
 
 @app.get("/api/encounters/<puuid>")
 def encounter(puuid: str):
-    """One player's full encounter record (or null if never seen)."""
+    pass
     return jsonify(encounter_log.get_one(puuid.strip()))
-
 
 @app.get("/api/match/<match_id>")
 def match(match_id: str):
-    """Full scoreboard for one past game (profile drill-in)."""
+    pass
     subject = request.args.get("subject")
     if _live_enabled():
         try:
             data = live_match.LiveMatch(LocalAuth()).match_detail(match_id, subject)
             if not data.get("error"):
                 return jsonify(data)
-        except Exception:  # noqa: BLE001
+        except Exception:
             app.logger.exception("match detail failed")
     return jsonify(sample_match.match_detail(match_id, subject))
 
-
 @app.get("/api/debug/reveal")
 def debug_reveal():
-    """Diagnose whether Incognito names are recoverable from match history."""
+    pass
     if not _live_enabled():
         return jsonify({"error": "Live client not available — open VALORANT."}), 400
     try:
         return jsonify(live_match.LiveMatch(LocalAuth()).diagnose_reveal())
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         app.logger.exception("debug reveal failed")
         return jsonify({"error": str(e)}), 500
 
-
 @app.get("/api/profile/<puuid>")
 def profile(puuid: str):
-    """Click-through player profile: recent games, teammates, averages."""
+    pass
     puuid = puuid.strip()
     if not puuid:
         return jsonify({"error": "puuid required"}), 400
@@ -360,8 +337,8 @@ def profile(puuid: str):
         try:
             data = live_match.LiveMatch(LocalAuth()).player_career(puuid)
             if not data.get("matches"):
-                data = None  # nothing live — fall through to demo
-        except Exception:  # noqa: BLE001
+                data = None
+        except Exception:
             app.logger.exception("live profile failed")
             data = None
     if data is None:
@@ -369,7 +346,6 @@ def profile(puuid: str):
 
     _CACHE[f"profile:{puuid}"] = (now, data)
     return jsonify(data)
-
 
 @app.get("/api/player/<puuid>")
 def player(puuid: str):
@@ -384,25 +360,23 @@ def player(puuid: str):
 
     try:
         payload = build_player_payload(puuid)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         app.logger.exception("player payload failed")
         return jsonify({"error": f"Failed to build player profile: {e}"}), 500
 
     _CACHE[puuid] = (now, payload)
     return jsonify(payload)
 
-
 @app.get("/api/region")
 def region():
-    """Auto-detected region + the selectable list (for the UI dropdown)."""
+    pass
     detected = None
     if LocalAuth.available():
         try:
             detected = LocalAuth().shard
-        except Exception:  # noqa: BLE001
+        except Exception:
             detected = None
     return jsonify({"detected": detected, "regions": REGIONS})
-
 
 @app.post("/api/dodge")
 def dodge():
@@ -411,10 +385,33 @@ def dodge():
                           region=body.get("region"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
+@app.get("/api/queue")
+def queue_get():
+    pass
+    return jsonify(client.party_state())
+
+@app.post("/api/queue")
+def queue_post():
+    pass
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "").lower()
+    dry = bool(body.get("dryRun", True))
+    region = body.get("region")
+    if action == "select":
+        result = client.set_queue(body.get("queueId"), dry_run=dry, region=region)
+    elif action == "start":
+        result = client.start_queue(dry_run=dry, region=region)
+    elif action == "stop":
+        result = client.stop_queue(dry_run=dry, region=region)
+    else:
+        return jsonify({"ok": False,
+                        "message": "action must be start|stop|select"}), 400
+    result["queue"] = client.party_state(region)
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 @app.post("/api/instalock")
 def instalock():
-    """One-shot lock attempt (used for a quick dry-run test)."""
+    pass
     body = request.get_json(silent=True) or {}
     agent = body.get("agent")
     mode = (body.get("mode") or "lock").lower()
@@ -425,14 +422,9 @@ def instalock():
                               region=body.get("region"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
-
 @app.post("/api/instalock/start")
 def instalock_start():
-    """Arm the auto-instalock loop (waits for agent select, then locks).
-
-    Accepts an optional ``perMap`` dict {mapName: agentName} that overrides the
-    default ``agent`` when the detected map matches.
-    """
+    pass
     body = request.get_json(silent=True) or {}
     agent = body.get("agent")
     mode = (body.get("mode") or "lock").lower()
@@ -459,16 +451,13 @@ def instalock_start():
                                     per_map=per_map)
     return jsonify(result), (200 if result.get("ok") else 400)
 
-
 @app.post("/api/instalock/stop")
 def instalock_stop():
     return jsonify(instalock_worker.stop())
 
-
 @app.get("/api/instalock/status")
 def instalock_status():
     return jsonify(instalock_worker.status())
-
 
 @app.get("/")
 def index():
@@ -478,27 +467,19 @@ def index():
                       "/api/instalock/start", "/api/settings", "/api/encounters"],
     })
 
-
 def _current_weapons(puuid: str) -> list:
-    """Equipped weapon skins for a player in the CURRENT match (from the live board)."""
+    pass
     try:
         board = build_live(7, None)
         for p in board.get("players") or []:
             if p.get("puuid") == puuid:
                 return p.get("weapons") or []
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return []
 
-
 def handle_data_request(req_type: str, params: dict | None) -> dict:
-    """
-    On-demand data for the hosted ProfileModal — past games, match detail and the
-    equipped-skins inventory — served over the WebSocket/Ably transport. The
-    hosted page can't reach the localhost-only /api/* routes, so the drill-in
-    data (which is too big to ride every live-state push) is fetched on demand.
-    Mirrors the /api/profile, /api/match and /api/encounters routes; read-only.
-    """
+    pass
     params = params or {}
     try:
         if req_type == "profile":
@@ -511,18 +492,16 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
                     d = live_match.LiveMatch(LocalAuth()).player_career(puuid)
                     if d.get("matches"):
                         data = d
-                except Exception:  # noqa: BLE001
+                except Exception:
                     app.logger.exception("transport profile failed")
             if data is None:
                 data = sample_match.career(puuid)
             out = dict(data)
-            # Fold in the current-match skins + the cross-session encounter so the
-            # modal has everything (incl. the skins stripped from the live board)
-            # in one round-trip.
+
             out["weapons"] = _current_weapons(puuid)
             try:
                 out["encounter"] = encounter_log.get_one(puuid)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 out["encounter"] = None
             return out
 
@@ -536,25 +515,28 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
                     d = live_match.LiveMatch(LocalAuth()).match_detail(match_id, subject)
                     if not d.get("error"):
                         return d
-                except Exception:  # noqa: BLE001
+                except Exception:
                     app.logger.exception("transport match failed")
             return sample_match.match_detail(match_id, subject)
 
         if req_type == "encounter":
             return encounter_log.get_one((params.get("puuid") or "").strip()) or {}
-    except Exception as e:  # noqa: BLE001
+
+        if req_type == "recap":
+
+            live_recap = session_tracker.current_recap() if _live_enabled() else None
+            return live_recap or sample_match.recap(int(params.get("seed") or 7))
+
+        if req_type == "encounters":
+            if _live_enabled():
+                return {"players": encounter_log.get_all()}
+            return {"players": sample_match.encounters(int(params.get("seed") or 7))}
+    except Exception as e:
         return {"error": f"request failed: {e}"}
     return {"error": f"unknown request '{req_type}'"}
 
-
 def _start_ws_bridge() -> None:
-    """
-    Start the local WebSocket bridge + Ably remote controller alongside Flask.
-
-    The hosted frontend (served from FRONTEND_URL) connects back to this socket
-    on loopback; commands flow through the shared CommandRouter. All URLs come
-    from environment variables — nothing is hardcoded to a production domain.
-    """
+    pass
     import ws_server
     import scout_commands
     import remote_ably
@@ -565,12 +547,7 @@ def _start_ws_bridge() -> None:
                                f"{frontend_url}/api/ably-token")
 
     def ws_state_provider() -> dict:
-        # Same board the existing dashboard consumes, plus a few extras the
-        # hosted page can no longer fetch over the (localhost-only) /api proxy:
-        #   instalock           - live worker status (arming/locked) for the panel
-        #   agents              - the static catalogue for the instalock grid
-        #   liveInstalockEnabled- whether live locking is allowed (vs dry-run only)
-        # `agents` is constant, so it never adds churn to the state diff.
+
         board = dict(build_live(7, None))
         board["instalock"] = instalock_worker.status()
         board["agents"] = AGENTS
@@ -590,17 +567,16 @@ def _start_ws_bridge() -> None:
                         frontend_url=frontend_url, ws_port=ws_port,
                         remote_controller=remote_controller,
                         request_handler=handle_data_request)
-    except Exception as e:  # noqa: BLE001 - never block Flask on the bridge
+    except Exception as e:
         app.logger.exception("WebSocket bridge failed to start")
         print(f"[app] WebSocket bridge unavailable: {e}", flush=True)
-
 
 if __name__ == "__main__":
     port = int(os.getenv("BACKEND_PORT", os.getenv("PORT", "5000")))
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
-    discord_presence.maybe_start()   # region auto-detected from the local client
-    # The Flask debug reloader runs this module twice; only start the bridge in
-    # the reloader's child (or when the reloader is off) so the port binds once.
+    discord_presence.maybe_start()
+    sync.maybe_start()
+
     if not debug or os.getenv("WERKZEUG_RUN_MAIN") == "true":
         _start_ws_bridge()
     print(f"[app] Valorant Scout API on http://127.0.0.1:{port}  "

@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 backend/.env
 .env
+frontend/.env.local
+.env.local
 
 # Local data (encounter ledger, etc.)
 backend/data/
@@ -25,6 +27,9 @@ vendor/
 Thumbs.db
 .vscode/
 .idea/
+
+# Owner-only ops (data-service schema, etc.)
+ops/
 
 # Claude Code local config
 .claude/

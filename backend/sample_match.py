@@ -1,22 +1,14 @@
-"""
-sample_match.py
-===============
-Deterministic demo "live match" — a full 10-player lobby (two teams, agents,
-revealed names, ranks, parties) emitted in the exact shape that
-live_match.build_scoreboard produces, so the scoreboard UI is fully explorable
-without VALORANT running. Pass ?seed= to roll a different lobby.
-"""
-
 from __future__ import annotations
 
 import random
+import time
 
 import sample_data
 import valapi
 from agents import AGENTS, resolve_agent
 from live_match import (_career_summary, assemble_player, compute_smurf,
-                        finalize)
-from vconstants import MAPS, party_color
+                        finalize, form_streak)
+from vconstants import GAMEMODES, MAPS, party_color, rank_from_tier
 
 _AGENT_NAMES = [a["name"] for a in AGENTS]
 _A = ["Toxic", "Silent", "Rapid", "Neon", "Vexed", "Frost", "Echo", "Lurk",
@@ -29,21 +21,50 @@ _SKINS = ["Prime", "Reaver", "Glitchpop", "Sovereign", "Elderflame", "Oni",
           "Prelude to Chaos", "Sentinels of Light", "Gaia's Vengeance"]
 _TITLES = ["Hardcore", "Mastermind", "Marksman", "Ace", "Clutch", "Tactician",
            "Legend", "Sharpshooter", "First Blood", "Rookie", "Vandalizer"]
-# Weapons surfaced in the demo inventory (real buy-menu order).
+
 _WEAPONS = ["Vandal", "Phantom", "Operator", "Sheriff", "Classic", "Ghost",
             "Spectre", "Marshal", "Guardian", "Judge", "Bulldog", "Odin"]
-# A few real player-card UUIDs so the demo shows banners (valorant-api CDN).
+
 _CARDS = [
     "1711d20d-4b1c-c64a-14be-d4ae58a457c6", "c8b2f5fd-4331-b172-f3b7-c8a26f356a1f",
     "eef542d2-4724-bc47-f53f-239f8c9c2623", "d32e58b1-4191-7315-ad4a-9da58b3f23dd",
     "d2d3caf9-499f-2ac8-9722-54961c3bcbf5", "e8787c31-4a39-9636-94a5-77b298d26ba7",
 ]
 
+_DEMO_QUEUE = {"queueId": "competitive", "inQueue": False, "queuedAt": None}
+_DEMO_ELIGIBLE = [q for q in GAMEMODES if q != "custom"]
+
+def demo_queue_state() -> dict:
+    pass
+    qid = _DEMO_QUEUE["queueId"]
+    return {
+        "available": True, "partyId": "demo-party",
+        "queueId": qid, "queueName": GAMEMODES[qid],
+        "eligible": [{"id": q, "name": GAMEMODES[q]} for q in _DEMO_ELIGIBLE],
+        "state": "MATCHMAKING" if _DEMO_QUEUE["inQueue"] else "DEFAULT",
+        "inQueue": _DEMO_QUEUE["inQueue"],
+        "queuedAt": _DEMO_QUEUE["queuedAt"],
+        "partySize": 1, "isOwner": True, "allReady": True,
+        "demo": True,
+    }
+
+def demo_queue_set(queue_id: str) -> dict:
+    _DEMO_QUEUE["queueId"] = queue_id
+    return {"ok": True, "status": "demo", "queueId": queue_id,
+            "message": f"Gamemode set to {GAMEMODES[queue_id]} (demo)."}
+
+def demo_queue_start() -> dict:
+    _DEMO_QUEUE.update(inQueue=True, queuedAt=time.time())
+    return {"ok": True, "status": "demo", "inQueue": True,
+            "message": f"Queue started — {GAMEMODES[_DEMO_QUEUE['queueId']]} (demo)."}
+
+def demo_queue_stop() -> dict:
+    _DEMO_QUEUE.update(inQueue=False, queuedAt=None)
+    return {"ok": True, "status": "demo", "inQueue": False,
+            "message": "Queue cancelled (demo)."}
 
 def _weapons(rng):
-    """A full equipped-skin inventory in the same shape as the live loadout.
-    Uses real skin art from valorant-api when reachable; falls back to a named
-    Standard tile offline."""
+    pass
     out = []
     for w in _WEAPONS:
         choices = valapi.skins_for_weapon(w)
@@ -53,25 +74,39 @@ def _weapons(rng):
             out.append({"weapon": w, "skin": {"name": rng.choice(_SKINS), "icon": None}})
     return out
 
+def _intel(rng, main_agent=None, map_name=None, hot=False):
+    pass
+    others = [a for a in rng.sample(_AGENT_NAMES, 4) if a != main_agent][:2]
+    main = main_agent or others.pop(0)
+    top = [{"agent": main, "games": rng.randint(3, 6)}]
+    top += [{"agent": a, "games": rng.randint(1, 3)} for a in others]
+    if hot:
+        form = ["W"] * rng.randint(3, 4)
+        form += [rng.choice(["W", "L"]) for _ in range(5 - len(form))]
+    else:
+        form = [rng.choice(["W", "L"]) for _ in range(5)]
+    map_wins = {}
+    if map_name:
+        g = rng.randint(2, 6)
+        map_wins[map_name] = [rng.randint(0, g), g]
+    return {"topAgents": top, "form": form, "streak": form_streak(form),
+            "mapWins": map_wins}
 
 def _name(rng):
     return f"{rng.choice(_A)}{rng.choice(_B)}#{rng.choice(_TAGS)}"
-
 
 def _puuid(rng):
     h = "0123456789abcdef"
     s = "".join(rng.choice(h) for _ in range(32))
     return f"{s[:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
 
-
 def generate(seed: int = 7) -> dict:
     rng = random.Random(seed)
 
     agents = rng.sample(_AGENT_NAMES, 10)
-    lobby_tier = rng.randint(11, 24)          # lobby skill anchor (Silver..Immortal)
+    lobby_tier = rng.randint(11, 24)
     map_name = rng.choice(MAPS)
 
-    # Pre-defined parties: a 3-stack on Blue, a 2-stack on Red.
     party_specs = [("Blue", [0, 1, 2]), ("Red", [0, 1])]
     party_lookup = {}
     parties_out = []
@@ -99,8 +134,6 @@ def generate(seed: int = 7) -> dict:
         for pu in puuids:
             party_lookup[pu] = {"id": pid, "color": color, "number": idx + 1}
 
-    # Plant one plausible smurf per team so the UI shows the flag in the demo:
-    # the 2nd Blue and 2nd Red slot get a low level + high peak/K-D.
     smurf_slots = {("Blue", 1), ("Red", 1)}
 
     players = []
@@ -113,13 +146,13 @@ def generate(seed: int = 7) -> dict:
             win_rate = rng.randint(38, 64)
             kd = round(rng.uniform(0.6, 1.8), 2)
             level = rng.randint(20, 480)
-            if (team, i) in smurf_slots:      # make it look like a smurf
-                peak = max(peak, 22)          # Ascendant+ peak
+            if (team, i) in smurf_slots:
+                peak = max(peak, 22)
                 tier = max(tier, 20)
                 kd = round(rng.uniform(1.4, 2.1), 2)
                 win_rate = max(win_rate, 64)
                 games = max(games, 20)
-                level = rng.randint(18, 55)   # low account level
+                level = rng.randint(18, 55)
             weapons = _weapons(rng)
             smurf, smurf_reasons = compute_smurf(
                 level=level, peak_tier=peak, rank_tier=tier,
@@ -150,6 +183,8 @@ def generate(seed: int = 7) -> dict:
                 title=rng.choice(_TITLES),
                 player_card=valapi.player_card(rng.choice(_CARDS)),
                 smurf=smurf, smurf_reasons=smurf_reasons,
+                intel=_intel(rng, slot["agent"], map_name,
+                             hot=(team, i) in smurf_slots),
             ))
 
     ally, enemy = sorted([rng.randint(0, 13), rng.randint(0, 13)], reverse=True)
@@ -159,11 +194,13 @@ def generate(seed: int = 7) -> dict:
                      map_splash=valapi.map_splash(map_name),
                      score={"ally": ally, "enemy": enemy, "round": ally + enemy + 1})
     board["sourceDetail"] = "Demo lobby (open VALORANT for live data)"
+
+    board["queue"] = demo_queue_state()
+    board["session"] = session(seed)
     return board
 
-
 def generate_lobby(seed: int = 7) -> dict:
-    """Deterministic demo lobby (MENUS): your party's ranks/levels/names."""
+    pass
     rng = random.Random(seed * 31 + 5)
     size = rng.randint(2, 5)
     tier = rng.randint(11, 24)
@@ -178,7 +215,7 @@ def generate_lobby(seed: int = 7) -> dict:
         games = rng.randint(20, 400)
         kd = round(rng.uniform(0.6, 1.8), 2)
         level = rng.randint(20, 480)
-        if i == 1:                            # plant one demo smurf in the party
+        if i == 1:
             peak = max(peak, 22)
             t = max(t, 20)
             kd = round(rng.uniform(1.4, 2.1), 2)
@@ -199,6 +236,7 @@ def generate_lobby(seed: int = 7) -> dict:
             title=rng.choice(_TITLES),
             player_card=valapi.player_card(rng.choice(_CARDS)),
             smurf=smurf, smurf_reasons=smurf_reasons,
+            intel=_intel(rng, hot=(i == 1)),
         ))
 
     parties_out = [{**party, "members": puuids}] if size > 1 else []
@@ -206,11 +244,12 @@ def generate_lobby(seed: int = 7) -> dict:
                      map_name=None, queue="Lobby", match_id=f"demo-lobby-{seed}",
                      parties=parties_out)
     board["sourceDetail"] = "Demo lobby (open VALORANT for live data)"
+    board["queue"] = demo_queue_state()
+    board["session"] = session(seed)
     return board
 
-
 def match_detail(match_id: str, subject: str = None) -> dict:
-    """Deterministic demo scoreboard for one past game (click-through)."""
+    pass
     rng = random.Random(sum(ord(c) for c in (match_id or "x")) + 11)
     agents = rng.sample(_AGENT_NAMES, 10)
     map_name = rng.choice(MAPS)
@@ -243,10 +282,76 @@ def match_detail(match_id: str, subject: str = None) -> dict:
         "players": players,
     }
 
+def recap(seed: int = 7) -> dict:
+    pass
+    rng = random.Random(seed * 17 + 3)
+    detail = match_detail(f"demo-{seed}", subject="demo-self")
+    players = detail["players"]
+    you = next(p for p in players if p["isSubject"])
+    mvp = players[0]
+    team_mvp = next(p for p in players if p["team"] == you["team"])
+    won = detail["result"] == "Victory"
+    delta = rng.randint(10, 28) * (1 if won else -1)
+    return {
+        "matchId": detail["matchId"],
+        "map": detail["map"], "mode": detail["mode"],
+        "result": detail["result"], "scores": detail["scores"],
+        "mvp": mvp, "teamMvp": team_mvp if team_mvp is not mvp else None,
+        "you": you, "yourAvgKd": round(rng.uniform(0.8, 1.4), 2),
+        "rrDelta": delta, "tierAfter": rng.randint(11, 24),
+        "rrAfter": rng.randint(0, 99),
+        "at": int(time.time()), "demo": True,
+    }
+
+def session(seed: int = 7) -> dict:
+    pass
+    rng = random.Random(seed * 13 + 1)
+    n = rng.randint(5, 9)
+    now = int(time.time())
+    rr, tier = rng.randint(20, 80), rng.randint(11, 24)
+    points = []
+    for i in range(n):
+        delta = rng.choice([1, 1, -1]) * rng.randint(12, 28)
+        rr += delta
+        if rr >= 100:
+            rr -= 100
+            tier = min(27, tier + 1)
+        elif rr < 0:
+            rr += 100
+            tier = max(3, tier - 1)
+        points.append({"matchId": f"demo-s{i}", "ts": now - (n - i) * 2400,
+                       "map": rng.choice(MAPS),
+                       "result": "Victory" if delta > 0 else "Defeat",
+                       "delta": delta, "tier": tier, "rr": rr})
+    return {"startedAt": points[0]["ts"],
+            "net": sum(p["delta"] for p in points), "points": points}
+
+def encounters(seed: int = 7) -> list:
+    pass
+    rng = random.Random(seed * 7 + 9)
+    now = int(time.time())
+    out = []
+    for i in range(12):
+        ww, lw = rng.randint(0, 3), rng.randint(0, 3)
+        wa, la = rng.randint(0, 3), rng.randint(0, 5)
+        tier = rng.randint(8, 24)
+        out.append({
+            "puuid": _puuid(rng), "name": _name(rng),
+            "withCount": ww + lw, "againstCount": wa + la,
+            "winsWith": ww, "lossesWith": lw,
+            "winsAgainst": wa, "lossesAgainst": la,
+            "rank": rank_from_tier(tier)["name"],
+            "peakRank": rank_from_tier(min(27, tier + rng.randint(0, 3)))["name"],
+            "kd": round(rng.uniform(0.7, 1.7), 2),
+            "winRate": rng.randint(38, 64),
+            "level": rng.randint(20, 400),
+            "lastSeen": now - rng.randint(1, 14) * 86400,
+            "agents": rng.sample(_AGENT_NAMES, rng.randint(1, 3)),
+        })
+    return out
 
 def career(puuid: str) -> dict:
-    """Deterministic demo career for the click-through profile (same shape as
-    LiveMatch.player_career)."""
+    pass
     raw = sample_data.generate_player(puuid, match_count=10)
     matches = []
     for i, m in enumerate(raw["matches"]):
@@ -256,7 +361,7 @@ def career(puuid: str) -> dict:
             "matchId": m["matchId"],
             "map": m["map"],
             "mode": m["mode"],
-            "startMillis": i,  # ordering only (demo has no real timestamps)
+            "startMillis": i,
             "result": m["result"],
             "agent": m["agent"],
             "agentPortrait": agent.get("portrait"),

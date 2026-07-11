@@ -1,27 +1,3 @@
-"""
-scout_commands.py
-=================
-Shared, transport-agnostic command router for the hosted-frontend bridge.
-
-Both the local WebSocket server (ws_server) and the Ably remote bridge
-(remote_ably) feed every inbound command through ONE ``CommandRouter`` so the
-security guarantees are identical regardless of where the command came from:
-
-  * server-side validation        — only the known commands run; payloads checked
-  * rate limiting                 — max 5 commands / 10s per client
-  * de-duplication                — a repeated command id is ignored once seen
-
-The router reuses the existing behaviour exactly:
-
-  instalock  -> InstalockWorker.start / .stop  (or one-shot RiotClient.instalock)
-  dodge      -> RiotClient.dodge
-  check_side -> read the current live board's ``side``/``map``
-  enable_remote / disable_remote -> RemoteController (Ably)
-
-Nothing here ever touches the lockfile, auth tokens or raw headers — it only
-calls the same high-level helpers the Flask routes already expose.
-"""
-
 from __future__ import annotations
 
 import collections
@@ -30,44 +6,40 @@ import time
 
 from agents import resolve_agent
 
-# The complete set of commands accepted from ANY transport. Anything else is
-# rejected before it can reach a handler.
 ALLOWED_COMMANDS = {
     "instalock",
     "dodge",
     "check_side",
+    "set_queue",
+    "start_queue",
+    "stop_queue",
     "enable_remote",
     "disable_remote",
 }
 
-# Rate limit: at most RATE_LIMIT commands inside RATE_WINDOW seconds per client.
 RATE_LIMIT = 5
 RATE_WINDOW = 10.0
-# How long a command id is remembered for de-duplication (seconds) and the cap
-# on remembered ids per client so the set can't grow unbounded.
+
 DEDUP_TTL = 120.0
 DEDUP_MAX = 256
 
-
 class CommandRouter:
-    """Validate, throttle, de-duplicate and execute Scout commands."""
+    pass
 
     def __init__(self, *, instalock_worker, riot_client, board_provider,
                  remote_controller=None):
         self.instalock_worker = instalock_worker
         self.riot_client = riot_client
-        # board_provider() -> current dashboard/live board dict (for check_side).
+
         self.board_provider = board_provider
         self.remote_controller = remote_controller
 
         self._lock = threading.Lock()
-        # client_id -> deque[timestamps] for the sliding-window rate limit.
-        self._calls: dict[str, collections.deque] = collections.defaultdict(collections.deque)
-        # client_id -> OrderedDict[command_id -> first_seen_ts] for de-dup.
-        self._seen: dict[str, "collections.OrderedDict[str, float]"] = \
-            collections.defaultdict(collections.OrderedDict)
 
-    # -- guards -------------------------------------------------------------
+        self._calls: dict[str, collections.deque] = collections.defaultdict(collections.deque)
+
+        self._seen: dict[str, "collections.OrderedDict[str, float]"] =            collections.defaultdict(collections.OrderedDict)
+
     def _rate_ok(self, client_id: str) -> bool:
         now = time.time()
         dq = self._calls[client_id]
@@ -83,7 +55,7 @@ class CommandRouter:
             return False
         now = time.time()
         seen = self._seen[client_id]
-        # Expire stale ids first.
+
         for k in [k for k, ts in seen.items() if now - ts > DEDUP_TTL]:
             seen.pop(k, None)
         if command_id in seen:
@@ -93,17 +65,11 @@ class CommandRouter:
             seen.popitem(last=False)
         return False
 
-    # -- entry point --------------------------------------------------------
     def execute(self, *, client_id: str, command: str, payload: dict | None,
                 command_id=None) -> dict:
-        """Run one command. Returns a JSON-serialisable ack dict.
-
-        Always returns ``{"ok": bool, "message": str, ...}``; never raises.
-        """
+        pass
         payload = payload if isinstance(payload, dict) else {}
 
-        # Validation + throttling under the lock; execution (which does network
-        # I/O) happens afterwards so we never hold the lock across a request.
         with self._lock:
             if command not in ALLOWED_COMMANDS:
                 return {"ok": False, "message": f"Unknown command '{command}'."}
@@ -121,28 +87,22 @@ class CommandRouter:
                 return self._dodge(payload)
             if command == "check_side":
                 return self._check_side(payload)
+            if command == "set_queue":
+                return self._set_queue(payload)
+            if command == "start_queue":
+                return self._queue_action("start_queue", payload)
+            if command == "stop_queue":
+                return self._queue_action("stop_queue", payload)
             if command == "enable_remote":
                 return self._enable_remote(payload)
             if command == "disable_remote":
                 return self._disable_remote(payload)
-        except Exception as e:  # noqa: BLE001 - never propagate to the socket
+        except Exception as e:
             return {"ok": False, "message": f"Command failed: {e}"}
         return {"ok": False, "message": f"Unhandled command '{command}'."}
 
-    # -- handlers -----------------------------------------------------------
     def _instalock(self, payload: dict) -> dict:
-        """
-        Arm/stop the auto-instalock loop, or fire a one-shot lock.
-
-        payload:
-          action: "start" (default) | "stop" | "once"
-          agent:  agent name/uuid (required for start/once)
-          mode:   "lock" | "select"
-          delay:  seconds before locking (start)
-          dryRun: default True — safe; reports only, no game input
-          region: optional region pin
-          perMap: optional {map: agent} overrides (start)
-        """
+        pass
         action = (payload.get("action") or "start").lower()
         if action == "stop":
             self.instalock_worker.stop()
@@ -166,7 +126,6 @@ class CommandRouter:
                                            region=region)
             return {**r, "ok": bool(r.get("ok"))}
 
-        # action == "start": arm the background loop (or dry-run preview).
         if dry_run:
             for mapn, name in (per_map or {}).items():
                 if not resolve_agent(name):
@@ -188,6 +147,25 @@ class CommandRouter:
         r = self.riot_client.dodge(dry_run=dry_run, region=region)
         return {**r, "ok": bool(r.get("ok"))}
 
+    def _set_queue(self, payload: dict) -> dict:
+        pass
+        qid = (payload.get("queueId") or "").strip().lower()
+        if not qid:
+            return {"ok": False, "message": "Field 'queueId' is required."}
+        r = self.riot_client.set_queue(qid, dry_run=bool(payload.get("dryRun", True)),
+                                       region=payload.get("region"))
+
+        return {**r, "ok": bool(r.get("ok")),
+                "queue": self.riot_client.party_state(payload.get("region"))}
+
+    def _queue_action(self, action: str, payload: dict) -> dict:
+        pass
+        fn = getattr(self.riot_client, action)
+        r = fn(dry_run=bool(payload.get("dryRun", True)),
+               region=payload.get("region"))
+        return {**r, "ok": bool(r.get("ok")),
+                "queue": self.riot_client.party_state(payload.get("region"))}
+
     def _check_side(self, _payload: dict) -> dict:
         board = self.board_provider() or {}
         side = board.get("side")
@@ -198,7 +176,6 @@ class CommandRouter:
         return {"ok": True, "side": None, "map": mapn,
                 "message": "Not in agent select / a match."}
 
-    # -- remote (Ably) ------------------------------------------------------
     def _enable_remote(self, _payload: dict) -> dict:
         if self.remote_controller is None:
             return {"ok": False, "configured": False,

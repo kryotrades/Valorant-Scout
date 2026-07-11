@@ -1,37 +1,14 @@
-"""
-pick_advisor.py
-============
-A "preferred agent" recommendation engine.
-
-The idea: pin an agent to instalock, optionally
-per map (`mapAgentSelect`). Here we invert that: instead of the user pinning an
-agent, we *tally the agents they actually play* across recent matches and
-recommend the one to instalock next — overall, per-map, and per-role — plus a
-win-rate signal so the suggestion favours agents the player performs on.
-"""
-
 from __future__ import annotations
 
 from collections import defaultdict
 
 from agents import resolve_agent, role_of
 
-
 def _blank_stat():
     return {"times": 0, "wins": 0, "kills": 0, "deaths": 0, "assists": 0}
 
-
 def recommend(matches: list[dict]) -> dict:
-    """
-    Returns:
-      {
-        "agent": <name>, "agentId": <uuid>, "role": <role>,
-        "times": <n>, "winRate": <0..100>, "portrait": <url>,
-        "perMap":  { <map>: {agent, times} },
-        "perRole": { <role>: {agent, times} },
-        "breakdown": [ {agent, role, times, winRate, color, portrait} ... ]
-      }
-    """
+    pass
     by_agent: dict[str, dict] = defaultdict(_blank_stat)
     by_map_agent: dict[str, dict] = defaultdict(lambda: defaultdict(int))
     by_role_agent: dict[str, dict] = defaultdict(lambda: defaultdict(int))
@@ -61,7 +38,6 @@ def recommend(matches: list[dict]) -> dict:
     def win_rate(stat):
         return round(100 * stat["wins"] / stat["times"], 1) if stat["times"] else 0.0
 
-    # Rank by (times played, then win-rate) — most-played, best-performing.
     ranked = sorted(
         by_agent.items(),
         key=lambda kv: (kv[1]["times"], win_rate(kv[1])),

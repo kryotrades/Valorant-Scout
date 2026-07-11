@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 cli.py — Valorant Scout in your terminal.
 
@@ -27,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+os.environ["SCOUT_QUIET"] = "1"
 
 def _load_env():
     for p in (ROOT / ".env", ROOT / "backend" / ".env"):
@@ -36,7 +36,6 @@ def _load_env():
                 if line and not line.startswith("#") and "=" in line:
                     k, _, v = line.partition("=")
                     os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-
 
 _load_env()
 
@@ -51,22 +50,17 @@ except ImportError:
     print("This view needs 'rich'.  Install with:  pip install rich")
     sys.exit(1)
 
-import sample_match  # noqa: E402
-from riot_client import LocalAuth  # noqa: E402
+import sample_match
+from riot_client import LocalAuth
 
-# Windows consoles default to cp1252 — force UTF-8 so glyphs/colours render.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 console = Console()
 
-
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
 def build_board(seed: int) -> dict:
     pref = os.environ.get("DATA_SOURCE", "auto").lower()
     if pref != "demo" and LocalAuth.available():
@@ -76,7 +70,7 @@ def build_board(seed: int) -> dict:
                 include_stats=os.environ.get("LIVE_INCLUDE_STATS", "true").lower() != "false")
             board.setdefault("sourceDetail", "Local VALORANT client")
             return board
-        except Exception as e:  # noqa: BLE001 - game running but unreadable
+        except Exception as e:
             return {"state": "OFFLINE", "stateLabel": "Offline", "source": "local",
                     "error": str(e), "players": [], "teams": {}, "parties": [],
                     "notice": {"level": "warn", "action": "restart_game",
@@ -88,10 +82,6 @@ def build_board(seed: int) -> dict:
                            "message": "Open VALORANT for live data (showing demo for now)."}
     return board
 
-
-# ---------------------------------------------------------------------------
-# Rendering
-# ---------------------------------------------------------------------------
 def kd_color(kd):
     if kd is None:
         return "grey50"
@@ -103,12 +93,10 @@ def kd_color(kd):
         return "#ECE8E1"
     return "#FF8088"
 
-
 def _cell_party(p):
     if p.get("party"):
         return Text(f"●{p['party']['number']}", style=f"bold {p['party']['color']}")
     return Text("")
-
 
 def _cell_name(p, team_color):
     style = p["party"]["color"] if p.get("party") else team_color
@@ -119,14 +107,12 @@ def _cell_name(p, team_color):
         txt.append("  (hidden)", style="italic #FF4655")
     return txt
 
-
 def _cell_peak(p):
-    """Peak rank with the act it was hit on a dim second line (e.g. 'V25 Act 1')."""
+    pass
     txt = Text(p["peakRank"], style=p["peakColor"])
     if p.get("peakAct"):
         txt.append(f"\n{p['peakAct']}", style="grey50")
     return txt
-
 
 def _add_team(table, players, team_color):
     for p in players:
@@ -147,7 +133,6 @@ def _add_team(table, players, team_color):
             Text(str(p["kd"]) if p.get("kd") is not None else "—", style=kd_color(p.get("kd"))),
             Text(f"{p['level']}{' *' if p['levelHidden'] else ''}", style="grey58"),
         )
-
 
 def render(board) -> Group:
     state = board.get("state")
@@ -178,17 +163,17 @@ def render(board) -> Group:
     table = Table(box=box.SIMPLE_HEAVY, expand=False, show_edge=False, pad_edge=False,
                   header_style="bold #7E8C92", border_style="grey23")
     table.add_column("P", justify="center", width=3)
-    table.add_column("Agent", width=10, no_wrap=True)
-    table.add_column("Name", width=22, no_wrap=True)
-    table.add_column("Rank", width=13, no_wrap=True)
-    table.add_column("RR", justify="right", width=4)
-    table.add_column("Peak", width=14, no_wrap=True)
-    table.add_column("Prev", width=11, no_wrap=True)
-    table.add_column("LB", justify="right", width=7)
-    table.add_column("HS%", justify="right", width=5)
-    table.add_column("WR", justify="right", width=11)
-    table.add_column("K/D", justify="right", width=5)
-    table.add_column("Lvl", justify="right", width=6)
+    table.add_column("Agent", width=9, no_wrap=True)
+    table.add_column("Name", width=15, no_wrap=True)
+    table.add_column("Rank", width=12, no_wrap=True)
+    table.add_column("RR", justify="right", width=3)
+    table.add_column("Peak", width=12, no_wrap=True)
+    table.add_column("Prev", width=9, no_wrap=True)
+    table.add_column("LB", justify="right", width=5)
+    table.add_column("HS%", justify="right", width=3)
+    table.add_column("WR", justify="right", width=10, no_wrap=True)
+    table.add_column("K/D", justify="right", width=4)
+    table.add_column("Lvl", justify="right", width=5)
 
     teams = board.get("teams", {})
     self_team = board.get("selfTeam", "Blue")
@@ -215,25 +200,18 @@ def render(board) -> Group:
         rows.append(Text(f"  ⚠ {notice['message']}", style=tone))
     return Group(*rows)
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Valorant Scout terminal scoreboard")
     ap.add_argument("--once", action="store_true", help="print once and exit")
     ap.add_argument("--interval", type=float, default=5.0, help="refresh seconds")
     ap.add_argument("--seed", type=int, default=7, help="demo lobby seed")
-    # Ignore unknown flags (run.py forwards its own flags like --prod when it
-    # opens the CLI in a separate console; argparse would otherwise crash it).
+
     args, _ = ap.parse_known_args()
 
     if args.once:
         console.print(render(build_board(args.seed)))
         return
 
-    # screen=True uses the alternate buffer and redraws the whole view each
-    # frame, so resizing the terminal re-flows cleanly instead of garbling.
     try:
         with Live(render(build_board(args.seed)), console=console,
                   refresh_per_second=4, screen=True, transient=False) as live:
@@ -242,7 +220,6 @@ def main():
                 live.update(render(build_board(args.seed)))
     except KeyboardInterrupt:
         console.print("[grey50]gg — bye.[/]")
-
 
 if __name__ == "__main__":
     main()

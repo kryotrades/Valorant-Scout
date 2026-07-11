@@ -1,18 +1,3 @@
-"""
-sample_data.py
-==============
-Deterministic demo-data generator.
-
-When neither the official Riot API (production VAL access) nor the local
-VALORANT client is reachable, the backend falls back to this generator so the
-dashboard is fully populated and every feature is demonstrable. Output is keyed
-to the PUUID, so the same PUUID always yields the same career.
-
-IMPORTANT: this only fabricates *raw* matches + identity. The genuine
-`party_detector` and `pick_advisor` pipelines then process this exactly as they
-would process live data — the demo path exercises the real logic.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -36,23 +21,19 @@ _NAME_PARTS_B = [
 ]
 _TAGS = ["NA1", "EUW", "APAC", "1337", "GG", "VAL", "KR", "OCE", "000", "RR"]
 
-
 def _seed_int(puuid: str) -> int:
     return int.from_bytes(hashlib.sha256(puuid.encode()).digest()[:8], "big")
 
-
 def _make_name(rng: random.Random) -> str:
     return f"{rng.choice(_NAME_PARTS_A)}{rng.choice(_NAME_PARTS_B)}#{rng.choice(_TAGS)}"
-
 
 def _fake_puuid(rng: random.Random) -> str:
     hexs = "0123456789abcdef"
     raw = "".join(rng.choice(hexs) for _ in range(32))
     return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
 
-
 def _line(rng: random.Random, rounds: int, won: bool, anchor: float):
-    """Generate one player's scoreline. `anchor` (0..1) skews skill."""
+    pass
     base_k = rng.uniform(0.55, 0.95) * rounds * (0.85 + anchor * 0.5)
     kills = max(3, int(base_k + rng.uniform(-3, 4)))
     deaths = max(3, int(rounds * rng.uniform(0.45, 0.8)))
@@ -70,23 +51,19 @@ def _line(rng: random.Random, rounds: int, won: bool, anchor: float):
         "hsPct": hs,
     }
 
-
 def generate_player(puuid: str, match_count: int = 20) -> dict:
-    """Return a deterministic raw player career for `puuid`."""
+    pass
     rng = random.Random(_seed_int(puuid))
 
-    # Identity & skill anchor.
     riot_id = _make_name(rng)
-    skill = rng.uniform(0.25, 0.85)          # 0 = struggling, 1 = smurf
-    rank_tier = 3 + int(skill * 21)          # Iron 1 .. Immortal 3-ish
+    skill = rng.uniform(0.25, 0.85)
+    rank_tier = 3 + int(skill * 21)
     rr = rng.randint(8, 98)
     peak_tier = min(27, rank_tier + rng.randint(0, 3))
 
-    # A "main" agent (used ~45% of the time) + a secondary pool.
     main_agent = rng.choice(_AGENT_NAMES)
     secondary = rng.sample([a for a in _AGENT_NAMES if a != main_agent], 5)
 
-    # A stable friend group so party-detection has signal.
     friends = [{"puuid": _fake_puuid(rng), "name": _make_name(rng)}
                for _ in range(rng.randint(2, 4))]
 
@@ -108,7 +85,6 @@ def generate_player(puuid: str, match_count: int = 20) -> dict:
 
         agent = main_agent if rng.random() < 0.45 else rng.choice(secondary)
 
-        # Build the ally team (4 teammates besides the subject).
         team = []
         n_friends = rng.randint(0, min(3, len(friends)))
         chosen_friends = rng.sample(friends, n_friends)

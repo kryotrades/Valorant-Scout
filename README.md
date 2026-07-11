@@ -6,14 +6,6 @@
 
 **Live in-match intelligence for VALORANT — see every player's rank, peak, K/D, win-rate, smurf risk, full skin inventory and party before the round even starts.**
 
-[![License: GPL v3](https://badgen.net/github/license/kryotrades/Valorant-Scout?color=FF4655)](LICENSE)
-[![Latest tag](https://badgen.net/github/tag/kryotrades/Valorant-Scout?color=FF4655)](https://github.com/kryotrades/Valorant-Scout/releases)
-[![Stars](https://badgen.net/github/stars/kryotrades/Valorant-Scout?color=FF4655)](https://github.com/kryotrades/Valorant-Scout/stargazers)
-[![Live demo](https://img.shields.io/badge/live_demo-valorantscout.vercel.app-FF4655?style=flat-square)](https://valorantscout.vercel.app)
-![Windows 10/11](https://img.shields.io/badge/Windows_10%2F11-0F1923?style=flat-square&logo=windows&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js-0F1923?style=flat-square&logo=nextdotjs&logoColor=white)
-![Python](https://img.shields.io/badge/Python-0F1923?style=flat-square&logo=python&logoColor=white)
-
 Reads your **local VALORANT client** in real time and renders it as a slick web dashboard, a colour-coded terminal scoreboard, and your **Discord status** — plus an instalock helper, a cross-session encounter log, and a VALORANT chat **ASCII art studio**.
 
 ### 🌐 [**valorantscout.vercel.app**](https://valorantscout.vercel.app)

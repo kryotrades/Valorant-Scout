@@ -1,4 +1,3 @@
-﻿# start.ps1 — everyday launcher for Valorant Scout (run via start.bat).
 . (Join-Path $PSScriptRoot "common.ps1")
 
 if (-not (Is-Installed)) {
@@ -8,9 +7,9 @@ if (-not (Is-Installed)) {
     exit 1
 }
 
-# Best-effort auto-update; never block launch if it can't reach GitHub.
 try { Invoke-ScoutUpdate | Out-Null } catch { Warn2 "Update check skipped: $($_.Exception.Message)" }
 
 Step "Launching Valorant Scout ..."
-Note "Keep this window open while you play; close it to stop the app."
+Note "Close the Valorant Scout scoreboard window to stop the app."
 & $VenvPy (Join-Path $Root "run.py") --prod
+

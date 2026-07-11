@@ -1,4 +1,3 @@
-﻿# install.ps1 — one-time setup for Valorant Scout (run via install.bat).
 . (Join-Path $PSScriptRoot "common.ps1")
 
 Write-Host ""
@@ -17,7 +16,6 @@ try {
         Note "Slim install — no local frontend bundled; the app uses the hosted dashboard."
     }
 
-    # --- region selection -------------------------------------------------
     $regions = @(
         @{ n = "North America"; k = "na" },
         @{ n = "Europe";        k = "eu" },
@@ -52,3 +50,4 @@ try {
     Write-Host "  Fix the issue above and run install.bat again." -ForegroundColor Yellow
     exit 1
 }
+

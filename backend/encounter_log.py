@@ -1,27 +1,3 @@
-"""
-encounter_log.py
-================
-Persistent "people you've met" ledger. Every player you actually share a live
-match/lobby with is logged across sessions, with how often you've been WITH
-(same team) or AGAINST them, plus their most recent stats snapshot.
-
-Storage
--------
-A single JSON file at backend/data/encounters.json, keyed by PUUID:
-
-  { "<puuid>": {
-      puuid, name, withCount, againstCount, lastSeen (epoch seconds),
-      lastMatchId, agents (list of agent names seen), rank, peakRank, kd,
-      winRate, level } }
-
-Dedup: a player's with/against counter only increments when the board's matchId
-differs from their stored `lastMatchId`, so the 5s polling of the SAME match
-never double-counts. Demo boards (source != "local") are ignored entirely.
-
-Thread-safe (a single module lock guards both the in-memory map and the file).
-Loaded once on import; saved (best-effort) after every recorded board.
-"""
-
 from __future__ import annotations
 
 import json
@@ -30,7 +6,6 @@ import tempfile
 import threading
 import time
 
-# data/ lives next to this module so it works regardless of the cwd.
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _PATH = os.path.join(_DATA_DIR, "encounters.json")
 
@@ -38,12 +13,8 @@ _LOCK = threading.Lock()
 _STORE: dict[str, dict] = {}
 _LOADED = False
 
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
 def _load() -> None:
-    """Read the ledger from disk once. Tolerates a missing/corrupt file."""
+    pass
     global _LOADED
     if _LOADED:
         return
@@ -54,17 +25,15 @@ def _load() -> None:
             _STORE.update({k: v for k, v in data.items() if isinstance(v, dict)})
     except FileNotFoundError:
         pass
-    except Exception:  # noqa: BLE001 - corrupt file -> start fresh, don't crash
+    except Exception:
         pass
     _LOADED = True
 
-
 def _save() -> None:
-    """Atomically persist the ledger. Caller holds _LOCK."""
+    pass
     try:
         os.makedirs(_DATA_DIR, exist_ok=True)
-        # Write to a temp file in the same dir, then replace — never leaves a
-        # half-written encounters.json behind on a crash/interrupt.
+
         fd, tmp = tempfile.mkstemp(dir=_DATA_DIR, prefix=".encounters-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -76,28 +45,13 @@ def _save() -> None:
                     os.remove(tmp)
                 except OSError:
                     pass
-    except Exception:  # noqa: BLE001 - persistence is best-effort
+    except Exception:
         pass
 
-
-# Load on import.
 _load()
 
-
-# ---------------------------------------------------------------------------
-# Recording
-# ---------------------------------------------------------------------------
 def record_board(board: dict | None) -> None:
-    """
-    Fold one finalized LIVE scoreboard into the ledger.
-
-    Only `source == "local"` boards count (demo boards are skipped). For every
-    player that is NOT self:
-      - if this board's matchId is NEW for that puuid (!= stored lastMatchId),
-        bump withCount (same team as self) or againstCount (other team);
-      - always refresh name/rank/peakRank/kd/winRate/level/agents/lastSeen and
-        set lastMatchId so the same match's repeated polls don't recount.
-    """
+    pass
     if not isinstance(board, dict) or board.get("source") != "local":
         return
 
@@ -138,7 +92,6 @@ def record_board(board: dict | None) -> None:
                 }
                 _STORE[puuid] = entry
 
-            # Count once per (puuid, matchId): only when this is a new match.
             if entry.get("lastMatchId") != match_id:
                 if self_team is not None and p.get("team") == self_team:
                     entry["withCount"] = int(entry.get("withCount") or 0) + 1
@@ -146,7 +99,6 @@ def record_board(board: dict | None) -> None:
                     entry["againstCount"] = int(entry.get("againstCount") or 0) + 1
                 entry["lastMatchId"] = match_id
 
-            # Always refresh the latest-stats snapshot.
             if p.get("name"):
                 entry["name"] = p.get("name")
             entry["rank"] = p.get("rank")
@@ -167,12 +119,33 @@ def record_board(board: dict | None) -> None:
         if changed:
             _save()
 
+def record_result(board: dict | None, won: bool | None) -> None:
+    pass
+    if won is None or not isinstance(board, dict) or board.get("source") != "local":
+        return
+    match_id = board.get("matchId")
+    if not match_id:
+        return
+    self_team = board.get("selfTeam")
+    changed = False
+    with _LOCK:
+        for p in board.get("players") or []:
+            if not isinstance(p, dict) or p.get("isSelf") or not p.get("puuid"):
+                continue
+            entry = _STORE.get(p["puuid"])
+            if entry is None or entry.get("lastResultMatchId") == match_id:
+                continue
+            entry["lastResultMatchId"] = match_id
+            same_team = self_team is not None and p.get("team") == self_team
+            key = (("winsWith" if won else "lossesWith") if same_team
+                   else ("winsAgainst" if won else "lossesAgainst"))
+            entry[key] = int(entry.get(key) or 0) + 1
+            changed = True
+        if changed:
+            _save()
 
-# ---------------------------------------------------------------------------
-# Lookups
-# ---------------------------------------------------------------------------
 def get_all(limit: int = 200) -> list[dict]:
-    """All ledger entries, most-encountered first (withCount + againstCount)."""
+    pass
     with _LOCK:
         entries = [dict(e) for e in _STORE.values()]
     entries.sort(
@@ -183,21 +156,16 @@ def get_all(limit: int = 200) -> list[dict]:
         return entries[:limit]
     return entries
 
-
 def get_one(puuid: str) -> dict | None:
-    """The full ledger entry for one PUUID, or None."""
+    pass
     if not puuid:
         return None
     with _LOCK:
         entry = _STORE.get(puuid)
         return dict(entry) if entry else None
 
-
 def encounter_for(puuid: str) -> dict | None:
-    """
-    Cheap {withCount, againstCount} for attaching to a live row, or None if the
-    player has never been seen before.
-    """
+    pass
     if not puuid:
         return None
     with _LOCK:

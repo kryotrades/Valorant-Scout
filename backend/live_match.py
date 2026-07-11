@@ -1,21 +1,3 @@
-"""
-live_match.py
-=============
-Live in-match scoreboard — modelled on the live VALORANT client pipeline,
-pulling every player in your current match straight from the local client:
-
-  state    : /chat/v4/presences            -> sessionLoopState (MENUS/PREGAME/INGAME)
-  players  : /core-game/v1/matches/{id}     (INGAME, both teams)
-             /pregame/v1/matches/{id}        (PREGAME, your team)
-  names    : PUT /name-service/v2/players    -> reveals Incognito ("hidden") names
-  parties  : decode each presence `private`  -> partyId/partySize grouping
-  rank     : /mmr/v1/players/{puuid}         -> tier, RR, leaderboard, peak, win-rate
-  kd / hs  : competitiveupdates + match-details (best-effort, cached)
-
-Produces a single normalized scoreboard dict (see build_scoreboard); the demo
-generator in sample_match emits the exact same shape.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -28,18 +10,16 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 import valapi
-from agents import resolve_agent
+from agents import UUID_TO_NAME, resolve_agent
 from vconstants import (GAMEMODES, party_color, rank_from_tier,
                         map_name_from_path, STATES)
 
-
 def _mode_label(queue: str) -> str:
-    """Friendly mode name from a raw queue id (e.g. 'competitive' -> 'Competitive')."""
+    pass
     if not queue:
         return "Custom"
     return GAMEMODES.get(queue.lower(), queue.replace("_", " ").title())
 
-# Seasons before Ascendant existed — peak-rank tiers >20 shift by +3.
 BEFORE_ASCENDANT = {
     "0df5adb9-4dcb-6899-1306-3e9860661dd3", "3f61c772-4560-cd3f-5d3f-a7ab5abda6b3",
     "0530b9c4-4980-f2ee-df5d-09864cd00542", "46ea6166-4573-1128-9cea-60a15640059b",
@@ -52,60 +32,63 @@ BEFORE_ASCENDANT = {
     "808202d6-4f2b-a8ff-1feb-b3a0590ad79f",
 }
 
-# Cache rank/stats per (matchId, puuid) so polling the scoreboard is cheap.
 _CACHE: dict[str, dict] = {}
-# Per-match static data (names + loadouts) — these never change mid-match, so we
-# fetch them once instead of every 5s poll. Only the current match is kept.
+
 _MATCH_META: dict[str, dict] = {}
-# Short-TTL cache for the lobby board (party rarely changes while idling).
+
 _LOBBY_CACHE: dict = {"key": None, "at": 0.0, "board": None}
-# Last good PREGAME/INGAME board. While the game LOADS (between Agent Select and
-# the match being fully ready) the session reports INGAME but core-game isn't
-# populated yet — rather than flash an empty "no match" lobby, we hold this board
-# (the agent-select screen) until the in-game board is ready. Cleared in menus.
+
 _LAST_BOARD: dict = {"board": None, "at": 0.0}
 _HOLD_SECS = 90.0
-# Persistent per-PUUID account-v1 name cache (official API; never re-asks).
+
 _ACCT_CACHE: dict[str, str | None] = {}
-# account-v1 routing cluster per shard.
+
 _ROUTING = {"na": "americas", "latam": "americas", "br": "americas",
             "eu": "europe", "ap": "asia", "kr": "asia"}
-# Process-wide season list cache (see LiveMatch._seasons).
+
 _CONTENT_CACHE: dict = {"seasons": None, "at": 0.0}
-# Per-PUUID account level recovered from match history (presence often omits it
-# now -> level 0 in the lobby). Cheap to keep around; the value is stable.
+
 _LEVEL_CACHE: dict[str, int] = {}
-# Guards the background K/D fill so only one runs per match at a time.
+
 _KD_FILL_LOCK = threading.Lock()
 _KD_FILLING: set[str] = set()
 
+_KD_CACHE: dict[tuple[str, bool], tuple[tuple, float]] = {}
+_KD_TTL = 15 * 60.0
+_KD_CACHE_MAX = 300
+
+_MATCH_DETAIL_CACHE: dict[str, dict] = {}
+_MATCH_DETAIL_MAX = 200
+
+_CACHE_WRITE_LOCK = threading.Lock()
+
+def _cache_put(cache: dict, cap: int, key, value) -> None:
+    pass
+    with _CACHE_WRITE_LOCK:
+        while len(cache) >= cap:
+            cache.pop(next(iter(cache)), None)
+        cache[key] = value
+
+_QUEUE_CACHE: dict = {"at": 0.0, "data": None}
 
 def _log(msg: str) -> None:
+    if os.getenv("SCOUT_QUIET"):
+        return
     print(f"[reveal] {msg}", flush=True)
 
-
 def _is_throttled(resp) -> bool:
-    """True when a pd/glz response is a 429 sentinel (see LocalAuth._json)."""
+    pass
     return isinstance(resp, dict) and resp.get("status") == 429
 
-
 def _fallback_name(puuid: str) -> str:
-    """Readable placeholder when every reveal path fails (never '#')."""
+    pass
     return f"Player-{(puuid or '????')[:4].upper()}"
 
-
 def smurf_signals(*, level, peak_tier, rank_tier, kd, win_rate, games) -> list[str]:
-    """
-    Heuristic smurf reasons: low account level paired with high skill/rank.
-    Returns a list of human-readable reason strings (empty == not flagged).
-
-      - level < 60 AND peak >= Diamond (tier 20)  -> "Lvl {level}, peak {peakRank}"
-      - kd >= 1.35 AND level < 80                  -> "K/D {kd} at lvl {level}"
-      - winRate >= 62 AND games >= 15 AND lvl<100  -> "{winRate}% WR"
-    """
+    pass
     reasons: list[str] = []
     lvl = level or 0
-    if lvl <= 0:                               # unknown level — can't judge
+    if lvl <= 0:
         return reasons
     if lvl < 60 and (peak_tier or 0) >= 20:
         reasons.append(f"Lvl {lvl}, peak {rank_from_tier(peak_tier)['name']}")
@@ -115,13 +98,19 @@ def smurf_signals(*, level, peak_tier, rank_tier, kd, win_rate, games) -> list[s
         reasons.append(f"{win_rate}% WR")
     return reasons
 
+def form_streak(form: list) -> dict | None:
+    pass
+    if not form:
+        return None
+    t, n = form[0], 1
+    for r in form[1:]:
+        if r != t:
+            break
+        n += 1
+    return {"type": t, "count": n}
 
 def compute_smurf(*, level, peak_tier, rank_tier, kd, win_rate, games) -> tuple[bool, list[str]]:
-    """
-    Decide smurf flag from the signals. A single strong low-level signal
-    (level < 60) is enough; otherwise require two corroborating signals so a
-    lone high-K/D or high-WR veteran isn't mislabelled.
-    """
+    pass
     reasons = smurf_signals(level=level, peak_tier=peak_tier, rank_tier=rank_tier,
                             kd=kd, win_rate=win_rate, games=games)
     if not reasons:
@@ -129,18 +118,19 @@ def compute_smurf(*, level, peak_tier, rank_tier, kd, win_rate, games) -> tuple[
     flagged = ((level or 0) < 60 and len(reasons) >= 1) or len(reasons) >= 2
     return flagged, reasons
 
-
 def assemble_player(*, puuid, name, name_hidden, team, is_self, agent_id,
                     rank_tier, rr, leaderboard, peak_tier, prev_tier,
                     win_rate, games, kd, hs, level, level_hidden, party,
                     skin=None, peak_act=None, rr_earned=None,
                     player_card=None, title=None, weapons=None,
-                    selection=None, smurf=False, smurf_reasons=None) -> dict:
-    """Shared player assembly used by both live and demo paths."""
+                    selection=None, smurf=False, smurf_reasons=None,
+                    intel=None) -> dict:
+    pass
     agent = resolve_agent(agent_id or "") or {}
     rank = rank_from_tier(rank_tier)
     peak = rank_from_tier(peak_tier)
     prev = rank_from_tier(prev_tier)
+    intel = intel or {}
     return {
         "puuid": puuid,
         "name": name,
@@ -155,7 +145,7 @@ def assemble_player(*, puuid, name, name_hidden, team, is_self, agent_id,
         "agentArt": agent.get("fullPortrait"),
         "agentColor": agent.get("color", "#8B978F"),
         "role": agent.get("role"),
-        "selection": selection,          # "" | "selected" | "locked" (pregame)
+        "selection": selection,
         "rankTier": rank["tier"],
         "rank": rank["name"],
         "rankColor": rank["color"],
@@ -181,17 +171,20 @@ def assemble_player(*, puuid, name, name_hidden, team, is_self, agent_id,
         "party": party,
         "smurf": bool(smurf),
         "smurfReasons": smurf_reasons or [],
-    }
 
+        "topAgents": intel.get("topAgents") or [],
+        "form": intel.get("form") or [],
+        "streak": intel.get("streak"),
+        "mapWins": intel.get("mapWins") or {},
+    }
 
 class LiveMatch:
     def __init__(self, auth):
         self.auth = auth
-        self.auth.headers()          # populate token + self puuid
+        self.auth.headers()
         self.self_puuid = self.auth.puuid
         self._content = None
 
-    # -- presences: state + parties ----------------------------------------
     def _presences(self) -> list:
         data = self.auth.local_get("/chat/v4/presences")
         return (data or {}).get("presences", []) or []
@@ -203,7 +196,7 @@ class LiveMatch:
         try:
             decoded = json.loads(base64.b64decode(str(private)).decode("utf-8"))
             return decoded if isinstance(decoded, dict) else {"isValid": False}
-        except Exception:  # noqa: BLE001
+        except Exception:
             return {"isValid": False}
 
     def game_state(self, presences) -> str:
@@ -219,7 +212,7 @@ class LiveMatch:
         return "MENUS"
 
     def party_map(self, puuids, presences) -> dict:
-        """{partyId: [puuid, ...]} for in-game parties (size > 1)."""
+        pass
         parties: dict[str, list] = {}
         for p in presences:
             if p.get("puuid") not in puuids:
@@ -238,12 +231,7 @@ class LiveMatch:
         return {pid: m for pid, m in parties.items() if len(m) > 1}
 
     def party_members(self, presences) -> list:
-        """
-        Everyone in YOUR lobby/party while in menus, from presences (the
-        the lobby path). Each entry: {puuid, level, incognito}. Account
-        level comes straight from the decoded presence, which carries it even
-        when the player hides it in-client.
-        """
+        pass
         def _fields(priv):
             data = priv.get("partyPresenceData", priv)
             pid = data.get("partyId", "")
@@ -271,20 +259,8 @@ class LiveMatch:
                                 "incognito": False})
         return members or [{"puuid": self.self_puuid, "level": 0, "incognito": False}]
 
-    # -- name reveal --------------------------------------------------------
     def reveal_names(self, puuids) -> dict:
-        """
-        Resolve every PUUID to "GameName#TagLine" via the name service.
-
-        This is how third-party tools "reveal" Incognito names: the
-        name-service returns the real name regardless of the in-game Incognito
-        flag (incognito only hides the name on the game HUD, not in the API).
-
-        Hardened vs. the naive call: refreshes the token and retries once if the
-        endpoint returns an errorCode (stale auth), then re-queries any PUUIDs
-        that still came back blank individually. Blank results are dropped so a
-        redacted entry never renders as a bare "#".
-        """
+        pass
         names: dict[str, str] = {}
         if not puuids:
             return names
@@ -305,31 +281,20 @@ class LiveMatch:
             if isinstance(res, dict) and res.get("errorCode"):
                 res = self.auth.pd_put("/name-service/v2/players", puuids, refresh=True)
             _ingest(res)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
-        # Retry a SMALL number of stragglers individually — batch calls
-        # occasionally drop a name. If many are missing they're almost certainly
-        # Incognito (the per-puuid retry won't help and just burns requests), so
-        # skip straight to the other reveal paths.
         missing = [p for p in puuids if p not in names]
         if missing and len(missing) <= 3:
             for puuid in missing:
                 try:
                     _ingest(self.auth.pd_put("/name-service/v2/players", [puuid]))
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
         return names
 
     def reveal_via_account_api(self, puuid: str) -> str | None:
-        """
-        Reveal a name via the official Riot **account-v1** API (by-puuid).
-
-        Incognito is a VALORANT in-game feature; the Riot account service still
-        holds the real Riot ID, so this un-hides even an always-Incognito player
-        — the one source that works when name-service AND match history are both
-        blank. Requires a (free) RIOT_API_KEY; no-ops otherwise. Cached per PUUID.
-        """
+        pass
         if puuid in _ACCT_CACHE:
             return _ACCT_CACHE[puuid]
         key = os.getenv("RIOT_API_KEY", "").strip()
@@ -348,27 +313,20 @@ class LiveMatch:
                     name = f"{gn}#{tl}" if tl else gn
             elif r.status_code in (401, 403):
                 _log("account-v1 rejected the key (check RIOT_API_KEY)")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _log(f"account-v1 lookup error: {e}")
         _ACCT_CACHE[puuid] = name
         return name
 
     def resolve_identity(self, puuid, name_service, ident):
-        """
-        Best name + account level for one player: name-service → account-v1
-        (only if RIOT_API_KEY is set) → readable fallback. Match-history reveal
-        was dropped — Incognito redaction is dynamic, so it can't recover names
-        and only slowed the board down. Account level comes from the identity
-        (0 when the player hides it).
-        """
+        pass
         name = name_service.get(puuid) or self.reveal_via_account_api(puuid)
         level = ident.get("AccountLevel", 0) or 0
         level_hidden = ident.get("HideAccountLevel", False)
         return name or _fallback_name(puuid), level, level_hidden
 
-    # -- live score / round -------------------------------------------------
     def match_score(self, presences) -> dict | None:
-        """Current round score from the self presence's decoded private blob."""
+        pass
         for p in presences:
             if p.get("puuid") != self.self_puuid:
                 continue
@@ -377,14 +335,17 @@ class LiveMatch:
             ally = data.get("partyOwnerMatchScoreAllyTeam")
             enemy = data.get("partyOwnerMatchScoreEnemyTeam")
             if ally is None and enemy is None:
+
+                ally = priv.get("partyOwnerMatchScoreAllyTeam")
+                enemy = priv.get("partyOwnerMatchScoreEnemyTeam")
+            if ally is None and enemy is None:
                 return None
             ally, enemy = int(ally or 0), int(enemy or 0)
             return {"ally": ally, "enemy": enemy, "round": ally + enemy + 1}
         return None
 
-    # -- equipped weapon skins (full inventory) -----------------------------
     def loadouts(self, state, match_id) -> dict:
-        """{puuid(lower): [ {weapon, skin} ... ]} for the active match."""
+        pass
         path = (f"/core-game/v1/matches/{match_id}/loadouts" if state == "INGAME"
                 else f"/pregame/v1/matches/{match_id}/loadouts")
         out: dict[str, list] = {}
@@ -394,18 +355,17 @@ class LiveMatch:
                 subj = (entry.get("Subject") or "").lower()
                 loadout = entry.get("Loadout", entry) if state == "INGAME" else entry
                 items = (loadout or {}).get("Items", {}) or {}
-                # PREGAME loadouts nest the real payload one level deeper.
+
                 if not items and isinstance(loadout, dict):
                     items = ((loadout.get("Loadout") or {}).get("Items", {}) or {})
                 if subj and items:
                     out[subj] = valapi.loadout_weapons(items)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return out
 
-    # -- match players ------------------------------------------------------
     def _current_players(self, state):
-        """Return (players[], matchId, mapId, queue) for the active match."""
+        pass
         if state == "INGAME":
             cg = self.auth.glz_get(f"/core-game/v1/players/{self.self_puuid}")
             mid = cg.get("MatchID")
@@ -430,11 +390,8 @@ class LiveMatch:
             return players, mid, match.get("MapID", ""), match.get("QueueID", "")
         return None
 
-    # -- season / rank / stats ---------------------------------------------
     def _seasons(self):
-        # Cached process-wide for an hour: the season list barely changes, and
-        # re-fetching this big payload every poll both wastes a request and risks
-        # a throttle blanking every player's rank (season=None -> all Unranked).
+
         now = time.time()
         if _CONTENT_CACHE["seasons"] is not None and now - _CONTENT_CACHE["at"] < 3600:
             return _CONTENT_CACHE["seasons"]
@@ -443,11 +400,11 @@ class LiveMatch:
                 f"https://shared.{self.auth.shard}.a.pvp.net/content-service/v3/content",
                 headers=self.auth.headers(), verify=False, timeout=8).json()
             seasons = data.get("Seasons", []) if isinstance(data, dict) else []
-            if seasons:                        # only cache a good response
+            if seasons:
                 _CONTENT_CACHE["seasons"] = seasons
                 _CONTENT_CACHE["at"] = now
             return seasons or (_CONTENT_CACHE["seasons"] or [])
-        except Exception:  # noqa: BLE001
+        except Exception:
             return _CONTENT_CACHE["seasons"] or []
 
     def season_id(self) -> str | None:
@@ -472,7 +429,7 @@ class LiveMatch:
         try:
             r = self.auth.pd_get(f"/mmr/v1/players/{puuid}")
             if not isinstance(r, dict) or "QueueSkills" not in r:
-                return out  # throttled / error — caller must NOT cache this
+                return out
             out["ok"] = True
             si = (((r.get("QueueSkills") or {}).get("competitive") or {})
                   .get("SeasonalInfoBySeasonID")) or {}
@@ -480,7 +437,7 @@ class LiveMatch:
             out["tier"] = cur.get("CompetitiveTier", 0) or 0
             out["rr"] = cur.get("RankedRating", 0) or 0
             out["lb"] = cur.get("LeaderboardRank", 0) or 0
-            # Previous act rank comes free from the same payload.
+
             if prev_season:
                 out["prev"] = (si.get(prev_season, {}) or {}).get("CompetitiveTier", 0) or 0
             peak = out["tier"]
@@ -497,27 +454,18 @@ class LiveMatch:
             games = cur.get("NumberOfGames", 0) or 0
             out["games"] = games
             out["wr"] = round(wins / games * 100) if games else 0
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return out
 
     def act_episode(self, season_id):
-        """
-        Readable peak-act label from a season UUID, e.g. 'V26 Act 3' / 'E8 Act 2'.
-
-        Primary source is valorant-api's seasons list, which carries the act->
-        episode parent link the game names from (the LOCAL content service does
-        not). Falls back to the local seasons (paired with the most recent
-        preceding episode-type season) when the CDN is unavailable.
-        """
+        pass
         if not season_id:
             return None
         label = valapi.season_label(season_id)
         if label:
             return label
 
-        # Fallback: local content service. Its Seasons have no ParentID, so pair
-        # each act with the most recent episode-type season before it.
         seasons = self._seasons()
         act = ep = None
         for s in seasons:
@@ -537,14 +485,7 @@ class LiveMatch:
         return (act.get("Name") or "").title() or None
 
     def level_from_history(self, puuid: str) -> int:
-        """
-        Recover a player's account level from their most recent match.
-
-        Presence increasingly omits `accountLevel` (-> shows 0 in the lobby), but
-        the stored match record keeps each player's `accountLevel` and it is NOT
-        Incognito-redacted. One history call + one match-details call; cached
-        per-PUUID so repeated lobby polls don't refetch.
-        """
+        pass
         if puuid in _LEVEL_CACHE:
             return _LEVEL_CACHE[puuid]
         level = 0
@@ -558,46 +499,23 @@ class LiveMatch:
                 pl = next((x for x in (md.get("players") or [])
                            if x.get("subject") == puuid), None)
                 level = int((pl or {}).get("accountLevel", 0) or 0)
-        except Exception:  # noqa: BLE001
+        except Exception:
             level = 0
-        if level > 0:                         # only cache a real recovery
+        if level > 0:
             _LEVEL_CACHE[puuid] = level
         return level
 
-    def kd_hs(self, puuid, competitive=False):
-        """
-        K/D and HS% for a player, plus RR± from their latest ranked game.
-
-        In a COMPETITIVE match we prefer their recent COMPETITIVE games so the
-        numbers reflect their comp form (paired with the comp win-rate from
-        rank_info), but we ALWAYS top the list up from plain match history so the
-        stats populate even when competitiveupdates is empty (new act, mostly-
-        casual players) or the click-through profile (which reads match history)
-        would otherwise show K/D where the row can't.
-
-        Match details are fetched IN PARALLEL and aggregated over whatever comes
-        back, so a single throttled (429) call no longer blanks the player — the
-        same resilience the profile modal's `player_career` already enjoys.
-
-        Returns ``(kd, hs, rr_earned, status)`` where status is:
-          - "ok"        : kd was computed.
-          - "empty"     : the player genuinely has no usable match data — caller
-                          can stop retrying.
-          - "throttled" : a request was rate-limited (429). The data exists, so
-                          the caller must KEEP retrying — never cache the gap.
-          - "error"     : an unexpected error/exception (not a 429). Caller may
-                          retry a few times then give up.
-        """
+    def kd_hs(self, puuid):
+        pass
+        cached = _KD_CACHE.get(puuid)
+        if cached and time.time() - cached[1] < _KD_TTL:
+            return cached[0]
         try:
             rr_earned = None
             mids: list[str] = []
             throttled = False
-            count = 5 if competitive else 3
+            count = 5
 
-            # Comp form (+ RR±) from competitiveupdates: the player's last 5
-            # COMPETITIVE games. retries>0: this is background work, so
-            # block-and-retry on a 429 (the enemy team is filled after your own
-            # and tends to hit the rate limit) instead of returning a blank.
             cu = self.auth.pd_get(
                 f"/mmr/v1/players/{puuid}/competitiveupdates?startIndex=0&endIndex={count}&queue=competitive",
                 retries=3)
@@ -607,10 +525,6 @@ class LiveMatch:
                 rr_earned = cmatches[0].get("RankedRatingEarned")
                 mids = [m["MatchID"] for m in cmatches if m.get("MatchID")]
 
-            # Only when the player has NO competitive history at all (new act,
-            # mostly-casual player) fall back to their recent match history so the
-            # stats aren't blank. In a comp match with comp games we use those
-            # games as-is — no mixing casual modes in to pad to 5.
             if not mids:
                 hist = self.auth.pd_get(
                     f"/match-history/v1/history/{puuid}?startIndex=0&endIndex={count}",
@@ -624,17 +538,40 @@ class LiveMatch:
                     if len(mids) >= count:
                         break
             if not mids:
-                return None, None, rr_earned, ("throttled" if throttled else "empty")
+                return None, None, rr_earned, ("throttled" if throttled else "empty"), None
 
             def fetch_detail(mid):
+                hit = _MATCH_DETAIL_CACHE.get(mid)
+                if hit is not None:
+                    return hit
                 md = self.auth.pd_get(f"/match-details/v1/matches/{mid}", retries=3)
                 if _is_throttled(md):
                     return "throttled"
-                return md if isinstance(md, dict) and "players" in md else None
+                if isinstance(md, dict) and "players" in md:
+                    _cache_put(_MATCH_DETAIL_CACHE, _MATCH_DETAIL_MAX, mid, md)
+                    return md
+                return None
 
             kills = deaths = hits = heads = used = 0
-            with ThreadPoolExecutor(max_workers=min(5, len(mids))) as ex:
+            agent_counts: dict[str, int] = {}
+            form: list[str] = []
+            map_wins: dict[str, list] = {}
+
+            with ThreadPoolExecutor(max_workers=min(3, len(mids))) as ex:
                 details = list(ex.map(fetch_detail, mids))
+            if (all(md is None for md in details) and cmatches):
+
+                hist = self.auth.pd_get(
+                    f"/match-history/v1/history/{puuid}?startIndex=0&endIndex={count}",
+                    retries=3)
+                throttled = throttled or _is_throttled(hist)
+                entries = (hist or {}).get("History", []) if isinstance(hist, dict) else []
+                hmids = [e["MatchID"] for e in entries
+                         if e.get("MatchID") and e["MatchID"] not in mids][:count]
+                if hmids:
+                    mids = hmids
+                    with ThreadPoolExecutor(max_workers=min(3, len(mids))) as ex:
+                        details = list(ex.map(fetch_detail, mids))
             for md in details:
                 if md == "throttled":
                     throttled = True
@@ -653,24 +590,42 @@ class LiveMatch:
                         kills += st.get("kills", 0)
                         deaths += st.get("deaths", 0)
                         used += 1
+
+                        aname = UUID_TO_NAME.get((pl.get("characterId") or "").lower())
+                        if aname:
+                            agent_counts[aname] = agent_counts.get(aname, 0) + 1
+                        teams = {t.get("teamId"): t for t in md.get("teams", [])}
+                        won = (teams.get(pl.get("teamId")) or {}).get("won")
+                        if won is not None:
+                            form.append("W" if won else "L")
+                            mapn = map_name_from_path(
+                                (md.get("matchInfo", {}) or {}).get("mapId", ""))
+                            mw = map_wins.setdefault(mapn, [0, 0])
+                            mw[1] += 1
+                            if won:
+                                mw[0] += 1
                         break
             if used == 0:
-                # Every match-details call we needed failed. If any were throttled
-                # this is transient; otherwise the data is genuinely unusable.
-                return None, None, rr_earned, ("throttled" if throttled else "empty")
+
+                return None, None, rr_earned, ("throttled" if throttled else "empty"), None
             kd = round(kills / deaths, 2) if deaths else float(kills)
             hs = round(heads / hits * 100) if hits else None
-            return kd, hs, rr_earned, "ok"
-        except Exception:  # noqa: BLE001
-            return None, None, None, "error"
+            intel = {
+                "topAgents": [{"agent": a, "games": n} for a, n in
+                              sorted(agent_counts.items(), key=lambda x: -x[1])[:3]],
+                "form": form,
+                "streak": form_streak(form),
+                "mapWins": map_wins,
+            }
+            result = (kd, hs, rr_earned, "ok", intel)
+            if not throttled and used == len(mids):
+                _cache_put(_KD_CACHE, _KD_CACHE_MAX, puuid, (result, time.time()))
+            return result
+        except Exception:
+            return None, None, None, "error", None
 
-    # -- background K/D fill (fast first load) ------------------------------
-    def _spawn_kd_fill(self, match_id, puuids, season, prev_season, competitive=False) -> None:
-        """
-        Compute K/D + HS% for the given players off the request thread and store
-        them into _CACHE, so the FIRST /api/live returns at rank-fetch speed and
-        K/D appears a poll or two later. Guarded so only one fill runs per match.
-        """
+    def _spawn_kd_fill(self, match_id, puuids, season, prev_season) -> None:
+        pass
         with _KD_FILL_LOCK:
             if match_id in _KD_FILLING:
                 return
@@ -678,34 +633,33 @@ class LiveMatch:
 
         def _run():
             try:
-                for puuid in puuids:
+                def _fill_one(puuid):
                     cache_key = f"{match_id}:{puuid}"
                     entry = _CACHE.get(cache_key)
                     if entry is None or entry.get("kd_done"):
-                        continue
+                        return
                     entry["kd_tries"] = entry.get("kd_tries", 0) + 1
-                    kd, hs, rr_earned, status = self.kd_hs(puuid, competitive)
+                    kd, hs, rr_earned, status, intel = self.kd_hs(puuid)
+                    if kd is None:
+                        _log(f"kd-fill {puuid[:8]} status={status} "
+                             f"tries={entry['kd_tries']}")
                     if kd is not None:
                         entry["kd"], entry["hs"] = kd, hs
                         entry["rr_earned"] = rr_earned
+                        entry["intel"] = intel
                         entry["kd_done"] = True
                     elif status == "empty":
-                        # Player genuinely has no usable match history — stop so we
-                        # don't re-query them every poll for the whole match.
+
                         entry["kd_done"] = True
                     elif status == "throttled":
-                        # Rate-limited (429) — NOT a missing-data case. The players
-                        # listed last get starved of burst tokens first, and other
-                        # tools / stale backends hitting the Riot edge make it
-                        # worse. The data exists, so keep retrying every poll and
-                        # NEVER cache the gap — a try cap here is what left whole
-                        # teams blank for the entire match.
+
                         pass
                     elif entry["kd_tries"] >= 6:
-                        # Persistent non-throttle error (e.g. malformed response) —
-                        # give up after a few attempts so we don't loop forever.
+
                         entry["kd_done"] = True
-                    # else: transient error — retry on the next poll.
+
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    list(ex.map(_fill_one, puuids))
             finally:
                 with _KD_FILL_LOCK:
                     _KD_FILLING.discard(match_id)
@@ -713,16 +667,17 @@ class LiveMatch:
         threading.Thread(target=_run, daemon=True,
                          name=f"kd-fill-{match_id[:8]}").start()
 
-    # -- scoreboard ---------------------------------------------------------
     def build_scoreboard(self, include_stats=True) -> dict:
         presences = self._presences()
         state = self.game_state(presences)
 
         if state == "MENUS":
-            # Genuinely back in menus — drop any held match board so we don't
-            # show a stale scoreboard after a game ends / a dodge.
+
             _LAST_BOARD["board"] = None
-            return self.build_lobby(presences, include_stats=include_stats)
+
+            board = dict(self.build_lobby(presences, include_stats=include_stats))
+            board["queue"] = self.queue_status()
+            return board
         if state not in ("INGAME", "PREGAME"):
             held = self._held_board()
             return held or {"state": state, "stateLabel": STATES.get(state, state),
@@ -730,10 +685,7 @@ class LiveMatch:
 
         current = self._current_players(state)
         if not current:
-            # Loading transition: the session says PREGAME/INGAME but core-game /
-            # pregame isn't ready yet (the match is still loading in). Keep the
-            # last good board (the agent-select screen) up instead of flashing an
-            # empty "no active match" lobby.
+
             held = self._held_board()
             return held or {"state": "MENUS", "stateLabel": STATES["MENUS"],
                             "source": "local", "players": [], "teams": {}, "parties": []}
@@ -741,17 +693,11 @@ class LiveMatch:
         raw_players, match_id, map_id, queue = current
         puuids = [p["Subject"] for p in raw_players]
 
-        # Names + loadouts are static for a match — fetch once, reuse every poll.
         if match_id not in _MATCH_META:
-            _MATCH_META.clear()               # only keep the current match
+            _MATCH_META.clear()
             _MATCH_META[match_id] = {}
         meta = _MATCH_META[match_id]
-        # Names can come back blank at match start (the name-service lags or
-        # throttles, especially for the enemy team), so don't cache a partial
-        # result for the whole match. Re-query only the players still unresolved,
-        # for a bounded number of polls, until they fill in. (Truly-Incognito
-        # names without a RIOT_API_KEY never resolve — the attempt cap stops us
-        # re-querying them every poll for the entire game.)
+
         names = meta.get("names") or {}
         missing_names = [p for p in puuids if p not in names]
         if missing_names and meta.get("name_tries", 0) < 8:
@@ -760,13 +706,12 @@ class LiveMatch:
             meta["names"] = names
         if not meta.get("loadouts"):
             ld = self.loadouts(state, match_id)
-            if ld:                            # only cache once guns exist (INGAME)
+            if ld:
                 meta["loadouts"] = ld
             weapons_by_puuid = ld
         else:
             weapons_by_puuid = meta["loadouts"]
 
-        # Parties.
         pmap = self.party_map(puuids, presences)
         party_lookup = {}
         parties_out = []
@@ -782,15 +727,7 @@ class LiveMatch:
         self_team = next((p["TeamID"] for p in raw_players
                           if p["Subject"] == self.self_puuid), "Blue")
 
-        # Fetch rank + name for every player CONCURRENTLY. The board was slow
-        # because these ran one request at a time; a thread pool collapses ~30
-        # sequential round-trips into a few. Cached players short-circuit.
-        #
-        # FAST FIRST LOAD: the very first time a (match:puuid) is seen we fetch
-        # only RANK (needed for sorting) and return kd/hs as null immediately; a
-        # background thread then fills K/D into _CACHE so the next poll has it.
-        # Steady-state polls read straight from _CACHE (~2 requests/poll).
-        uncached_kd: list[str] = []           # puuids needing a background K/D fill
+        uncached_kd: list[str] = []
 
         def fetch_player(p):
             puuid = p["Subject"]
@@ -799,23 +736,19 @@ class LiveMatch:
             cached = _CACHE.get(cache_key)
             if cached is None:
                 rk = self.rank_info(puuid, season, prev_season)
-                # First sight: rank now, K/D deferred to the background fill.
+
                 cached = {"rk": rk, "prev": rk.get("prev", 0),
                           "kd": None, "hs": None, "rr_earned": None,
                           "kd_done": not include_stats}
-                if rk.get("ok"):              # don't cache a throttled Unranked
+                if rk.get("ok"):
                     _CACHE[cache_key] = cached
                 if include_stats:
                     uncached_kd.append(puuid)
             elif include_stats and not cached.get("kd_done"):
-                # Seen before but K/D still missing (throttled on an earlier
-                # fill) — queue it for another background attempt.
+
                 uncached_kd.append(puuid)
             name, level, level_hidden = self.resolve_identity(puuid, names, ident)
-            # In-game presence often omits accountLevel (-> "Lvl 0"). The lobby
-            # path already recovers it from match history; do the same here. The
-            # stored level is NOT incognito-redacted and is cached per-PUUID, so
-            # this is cheap and runs inside the existing thread pool.
+
             if (level or 0) <= 0:
                 recovered = self.level_from_history(puuid)
                 if recovered > 0:
@@ -825,17 +758,21 @@ class LiveMatch:
         with ThreadPoolExecutor(max_workers=min(6, len(raw_players) or 1)) as ex:
             resolved = {r[0]: r[1:] for r in ex.map(fetch_player, raw_players)}
 
-        # Kick off a single background K/D fill for the players still missing it.
-        # In a competitive match we compute comp-specific K/D / HS%.
         if uncached_kd:
-            self._spawn_kd_fill(match_id, uncached_kd, season, prev_season,
-                                competitive=(queue or "").lower() == "competitive")
+            self._spawn_kd_fill(match_id, uncached_kd, season, prev_season)
 
         players = []
         for p in raw_players:
             puuid = p["Subject"]
             ident = p.get("PlayerIdentity", {}) or {}
             cached, name, level, level_hidden = resolved[puuid]
+            if name == _fallback_name(puuid):
+
+                agent_meta = resolve_agent(p.get("CharacterID", "") or "") or {}
+                if state != "PREGAME" and agent_meta.get("name"):
+                    name = agent_meta["name"]
+                else:
+                    name = f"Player {len(players) + 1}"
             rk = cached["rk"]
             weapons = weapons_by_puuid.get(puuid.lower(), [])
             vandal = next((w["skin"] for w in weapons
@@ -862,43 +799,51 @@ class LiveMatch:
                 weapons=weapons,
                 peak_act=self.act_episode(rk.get("peak_season")),
                 rr_earned=cached.get("rr_earned"),
+                intel=cached.get("intel"),
                 player_card=valapi.player_card(ident.get("PlayerCardID")),
                 title=valapi.title_text(ident.get("PlayerTitleID")),
                 smurf=smurf, smurf_reasons=smurf_reasons,
             ))
 
         map_name = map_name_from_path(map_id)
+        score = self.match_score(presences) if state == "INGAME" else None
+        if score and (queue or "").lower() in ("deathmatch", "hurm"):
+            score["round"] = None
         board = finalize(players, state=state, source="local", self_team=self_team,
                          map_name=map_name, queue=queue, match_id=match_id,
                          parties=parties_out, map_splash=valapi.map_splash(map_name),
-                         score=self.match_score(presences) if state == "INGAME" else None)
+                         score=score)
         board["riotRequests"] = self.auth.req_count
-        # Remember this as the last good board so we can hold it over the brief
-        # PREGAME->INGAME loading gap (see _held_board / build_scoreboard).
+
         _LAST_BOARD["board"] = board
         _LAST_BOARD["at"] = time.time()
         return board
 
     def _held_board(self):
-        """The last good PREGAME/INGAME board, if it's recent enough to bridge a
-        loading gap — else None."""
+        pass
         b = _LAST_BOARD.get("board")
         if b and (time.time() - _LAST_BOARD.get("at", 0.0)) < _HOLD_SECS:
             return b
         return None
 
-    # -- diagnostic: is incognito redaction per-match or dynamic? -----------
+    def queue_status(self) -> dict:
+        pass
+        now = time.time()
+        if _QUEUE_CACHE["data"] is not None and now - _QUEUE_CACHE["at"] < 3.0:
+            return _QUEUE_CACHE["data"]
+        from riot_client import party_snapshot
+        try:
+            snap = party_snapshot(self.auth)
+        except Exception:
+            snap = {"available": False}
+        if snap.get("throttled") and _QUEUE_CACHE["data"]:
+            return _QUEUE_CACHE["data"]
+        snap.pop("throttled", None)
+        _QUEUE_CACHE.update(at=now, data=snap)
+        return snap
+
     def diagnose_reveal(self, max_players=2, max_matches=8) -> dict:
-        """
-        For the Incognito players in the current match, scan their match history
-        and report, per match, whether their real name is present in the stored
-        `/match-details` record. Answers the open question:
-          - if a name EVER appears -> redaction is baked per-match -> a deeper
-            history search can recover it (no API key needed);
-          - if it NEVER appears -> redaction is dynamic on current status ->
-            only account-v1 (RIOT_API_KEY) can reveal it.
-        Read-only, user-triggered, bounded.
-        """
+        pass
         presences = self._presences()
         state = self.game_state(presences)
         current = self._current_players(state)
@@ -932,7 +877,7 @@ class LiveMatch:
                         "name": (f"{gn}#{(pl or {}).get('tagLine', '')}" if gn.strip() else None),
                         "level": (pl or {}).get("accountLevel"),
                     })
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 entry["error"] = str(e)
             entry["nameEverPresent"] = any(x["namePresent"] for x in entry["matches"])
             report.append(entry)
@@ -947,14 +892,11 @@ class LiveMatch:
         return {"state": state, "incognitoCount": len(targets),
                 "verdict": verdict, "report": report}
 
-    # -- lobby (menus) ------------------------------------------------------
     def build_lobby(self, presences, include_stats=False) -> dict:
-        """In-lobby scoreboard: your party's ranks/levels/names while in menus."""
+        pass
         members = self.party_members(presences)
         puuids = [m["puuid"] for m in members]
 
-        # Idling in menus polls every 5s but the party rarely changes — serve a
-        # cached board for 20s per member set so we don't refetch ranks endlessly.
         key = tuple(sorted(puuids))
         now = time.time()
         if (_LOBBY_CACHE["board"] is not None and _LOBBY_CACHE["key"] == key
@@ -972,22 +914,21 @@ class LiveMatch:
         def fetch_member(m):
             puuid = m["puuid"]
             rk = self.rank_info(puuid, season, prev_season)
-            kd = hs = None
+            kd = hs = intel = None
             if include_stats:
-                kd, hs, _, _ = self.kd_hs(puuid)
-            # Presence often omits accountLevel now (-> 0). Recover it from the
-            # player's latest stored match (not Incognito-redacted). Cheap: the
-            # lobby is <=5 players, cached per-PUUID and 20s board-wide.
+
+                kd, hs, _, _, intel = self.kd_hs(puuid)
+
             level = m.get("level", 0) or 0
             if level <= 0:
                 level = self.level_from_history(puuid)
-            return m, rk, kd, hs, level
+            return m, rk, kd, hs, level, intel
 
         with ThreadPoolExecutor(max_workers=min(6, len(members) or 1)) as ex:
             fetched = list(ex.map(fetch_member, members))
 
         players = []
-        for m, rk, kd, hs, lvl in fetched:
+        for m, rk, kd, hs, lvl, intel in fetched:
             puuid = m["puuid"]
             ident = {"AccountLevel": lvl, "HideAccountLevel": False,
                      "Incognito": m.get("incognito", False)}
@@ -1001,6 +942,7 @@ class LiveMatch:
                 rank_tier=rk["tier"], rr=rk["rr"], leaderboard=rk["lb"],
                 peak_tier=rk["peak"], prev_tier=rk.get("prev", 0),
                 win_rate=rk["wr"], games=rk["games"], kd=kd, hs=hs,
+                intel=intel,
                 level=level, level_hidden=level_hidden,
                 party=party, peak_act=self.act_episode(rk.get("peak_season")),
                 smurf=smurf, smurf_reasons=smurf_reasons,
@@ -1014,18 +956,13 @@ class LiveMatch:
         _LOBBY_CACHE.update(key=key, at=now, board=board)
         return board
 
-    # -- per-player career (profile drill-in) -------------------------------
     def player_career(self, puuid: str, count: int = 8) -> dict:
-        """
-        Recent match history for one player — past games (agent, map, result,
-        K/D/A, RR±) plus the teammates in each, mirroring the client's
-        match-details walk. Powers the click-through player profile.
-        """
+        pass
         try:
             hist = self.auth.pd_get(
                 f"/match-history/v1/history/{puuid}?startIndex=0&endIndex={count}")
             entries = hist.get("History", []) or [] if isinstance(hist, dict) else []
-        except Exception:  # noqa: BLE001
+        except Exception:
             entries = []
         mids = [h["MatchID"] for h in entries if h.get("MatchID")]
 
@@ -1033,18 +970,17 @@ class LiveMatch:
             try:
                 return self._career_match(
                     self.auth.pd_get(f"/match-details/v1/matches/{mid}"), puuid, mid)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return None
 
         matches, mate_puuids = [], set()
         if mids:
             with ThreadPoolExecutor(max_workers=min(8, len(mids))) as ex:
-                for row in ex.map(fetch_detail, mids):   # order preserved
+                for row in ex.map(fetch_detail, mids):
                     if row:
                         matches.append(row)
                         mate_puuids.update(m["puuid"] for m in row["teammates"])
 
-        # One batched name reveal for every teammate seen across the history.
         names = self.reveal_names(list(mate_puuids)) if mate_puuids else {}
         for row in matches:
             for mate in row["teammates"]:
@@ -1065,10 +1001,8 @@ class LiveMatch:
         teams = {t.get("teamId"): t for t in md.get("teams", []) if t.get("teamId")}
         mine = teams.get(team_id, {})
         won = mine.get("won")
-        rounds = max((t.get("roundsWon", 0) for t in teams.values()), default=0) + \
-            min((t.get("roundsWon", 0) for t in teams.values()), default=0)
+        rounds = max((t.get("roundsWon", 0) for t in teams.values()), default=0) +            min((t.get("roundsWon", 0) for t in teams.values()), default=0)
 
-        # Head-shot % from per-round damage (same maths as kd_hs).
         hits = heads = 0
         for rr in md.get("roundResults", []):
             for ps in rr.get("playerStats", []):
@@ -1105,17 +1039,13 @@ class LiveMatch:
         }
 
     def match_detail(self, match_id: str, subject: str | None = None) -> dict:
-        """
-        Full scoreboard for ONE past game — every player's agent, K/D/A, ACS,
-        HS% and team, so the profile can drill into 'how they did that game'.
-        """
+        pass
         md = self.auth.pd_get(f"/match-details/v1/matches/{match_id}")
         if not isinstance(md, dict) or "players" not in md:
             return {"error": "Match details unavailable."}
         info = md.get("matchInfo", {}) or {}
         teams = {t.get("teamId"): t for t in md.get("teams", []) if t.get("teamId")}
-        rounds = sum(t.get("roundsWon", 0) for t in teams.values()) \
-            or len(md.get("roundResults", [])) or 1
+        rounds = sum(t.get("roundsWon", 0) for t in teams.values())            or len(md.get("roundResults", [])) or 1
 
         hits: dict = {}
         heads: dict = {}
@@ -1123,8 +1053,7 @@ class LiveMatch:
             for ps in rr.get("playerStats", []):
                 s = ps.get("subject")
                 for dmg in ps.get("damage", []):
-                    hits[s] = hits.get(s, 0) + dmg.get("legshots", 0) + \
-                        dmg.get("bodyshots", 0) + dmg.get("headshots", 0)
+                    hits[s] = hits.get(s, 0) + dmg.get("legshots", 0) +                        dmg.get("bodyshots", 0) + dmg.get("headshots", 0)
                     heads[s] = heads.get(s, 0) + dmg.get("headshots", 0)
 
         raw = md.get("players", []) or []
@@ -1168,14 +1097,13 @@ class LiveMatch:
             "players": players,
         }
 
-
 def _career_summary(matches: list) -> dict:
-    """Aggregate a career: headline averages + most-played-with teammates."""
+    pass
     n = len(matches)
     if not n:
         return {"averages": {"games": 0, "wins": 0, "winRate": 0, "kd": 0,
                              "kills": 0, "deaths": 0, "assists": 0, "hsPct": 0},
-                "coPlayers": []}
+                "coPlayers": [], "agentPool": [], "mapStats": []}
     wins = sum(1 for m in matches if m["result"] == "Victory")
     k = sum(m["kills"] for m in matches)
     d = sum(m["deaths"] for m in matches)
@@ -1200,6 +1128,29 @@ def _career_summary(matches: list) -> dict:
          for e in seen.values()),
         key=lambda x: x["sharedMatches"], reverse=True)[:6]
 
+    def _tally(key):
+        out: dict[str, list] = {}
+        for m in matches:
+            name = m.get(key)
+            if not name or name == "Unknown":
+                continue
+            t = out.setdefault(name, [0, 0])
+            t[1] += 1
+            if m["result"] == "Victory":
+                t[0] += 1
+        return out
+
+    agent_pool = [
+        {"agent": ag, "games": g, "winRate": round(100 * w / g),
+         "portrait": (resolve_agent(ag) or {}).get("portrait"),
+         "color": (resolve_agent(ag) or {}).get("color", "#8B978F")}
+        for ag, (w, g) in sorted(_tally("agent").items(), key=lambda x: -x[1][1])
+    ][:5]
+    map_stats = [
+        {"map": mp, "games": g, "wins": w, "winRate": round(100 * w / g)}
+        for mp, (w, g) in sorted(_tally("map").items(), key=lambda x: -x[1][1])
+    ]
+
     return {
         "averages": {
             "games": n, "wins": wins, "winRate": round(100 * wins / n),
@@ -1208,11 +1159,12 @@ def _career_summary(matches: list) -> dict:
             "hsPct": round(sum(hs) / len(hs)) if hs else None,
         },
         "coPlayers": co_players,
+        "agentPool": agent_pool,
+        "mapStats": map_stats,
     }
 
-
 def _team_stats(team_players: list) -> dict:
-    """Aggregate skill metrics for one team's player list."""
+    pass
     ranked = [p["rankTier"] for p in team_players if (p.get("rankTier") or 0) > 0]
     kds = [p["kd"] for p in team_players if p.get("kd") is not None]
     wrs = [p["winRate"] for p in team_players if p.get("winRate") is not None]
@@ -1222,15 +1174,15 @@ def _team_stats(team_players: list) -> dict:
         "avgRankTier": round(avg_tier, 2),
         "avgRank": rank_meta["name"],
         "rankColor": rank_meta["color"],
+        "rankIcon": valapi.rank_icon(round(avg_tier)) if ranked else None,
         "avgKd": round(sum(kds) / len(kds), 2) if kds else None,
         "avgWinRate": round(sum(wrs) / len(wrs)) if wrs else None,
         "smurfCount": sum(1 for p in team_players if p.get("smurf")),
         "size": len(team_players),
     }
 
-
 def _win_prob(self_stats: dict, enemy_stats: dict) -> int:
-    """Estimate self-team win % from rank + K/D edge. Clamped 5..95."""
+    pass
     prob = 50.0
     prob += (self_stats["avgRankTier"] - enemy_stats["avgRankTier"]) * 5
     self_kd = self_stats["avgKd"]
@@ -1239,24 +1191,28 @@ def _win_prob(self_stats: dict, enemy_stats: dict) -> int:
         prob += (self_kd - enemy_kd) * 20
     return max(5, min(95, round(prob)))
 
-
 def finalize(players, *, state, source, self_team, map_name, queue, match_id,
              parties, map_splash=None, score=None):
-    """Sort players by team then rank, split into teams, attach meta."""
+    pass
+
+    for p in players:
+        mw = p.pop("mapWins", None) or {}
+        w, g = (mw.get(map_name) or [0, 0]) if map_name else (0, 0)
+        p["mapWinRate"] = {"winRate": round(100 * w / g), "games": g} if g else None
     players.sort(key=lambda x: (x["team"] != self_team, -x["rankTier"], -(x["level"] or 0)))
     teams = {}
     for p in players:
         teams.setdefault(p["team"], []).append(p)
-    # Per-team skill aggregates (avg rank/K/D/WR, smurf count, size).
+
     team_stats = {tid: _team_stats(tp) for tid, tp in teams.items()}
-    # Win probability for the SELF team — only meaningful INGAME with both teams.
+
     win_prob = None
     if state == "INGAME" and len(team_stats) == 2 and self_team in team_stats:
         enemy_team = next(t for t in team_stats if t != self_team)
         win_prob = _win_prob(team_stats[self_team], team_stats[enemy_team])
-    # Agent-select progress (how many have locked) for the PREGAME header.
+
     locked = sum(1 for p in players if p.get("selection") == "locked")
-    # Your side this match (Red = Attack, Blue = Defend) — the check-side feature.
+
     side = ({"Red": "Attacker", "Blue": "Defender"}.get(self_team)
             if state in ("INGAME", "PREGAME") else None)
     return {

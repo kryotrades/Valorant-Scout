@@ -1,22 +1,10 @@
-"""
-agents.py
-=========
-Canonical VALORANT agent dataset.
-
-The agent -> UUID map and per-agent accent colours are baked in here. Roles are
-curated. Portrait/icon art is served from the public valorant-api.com CDN, keyed
-by the same UUIDs, so no binary assets are bundled.
-"""
-
 from __future__ import annotations
 
-# --- Roles -----------------------------------------------------------------
 DUELIST = "Duelist"
 INITIATOR = "Initiator"
 CONTROLLER = "Controller"
 SENTINEL = "Sentinel"
 
-# name -> (uuid, role, accent_hex)
 _AGENTS = {
     "Jett":      ("add6443a-41bd-e414-f6ad-e58d267f4e95", DUELIST,    "#9ADEFF"),
     "Phoenix":   ("eb93336a-449b-9c1b-0a54-a891f7921d69", DUELIST,    "#FE8266"),
@@ -41,6 +29,7 @@ _AGENTS = {
     "Astra":     ("41fb69c1-4189-7b37-f117-bcaf1e96f1bf", CONTROLLER, "#712AE8"),
     "Harbor":    ("95b78ed7-4637-86d9-7e41-71ba8c293152", CONTROLLER, "#008080"),
     "Clove":     ("1dbf2edd-4729-0984-3115-daa5eed44993", CONTROLLER, "#F28FD0"),
+    "Miks":      ("7c8a4701-4de6-9355-b254-e09bc2a34b72", CONTROLLER, "#6B4BB0"),
 
     "Sage":      ("569fdd95-4d10-43ab-ca70-79becc718b46", SENTINEL,   "#26C8AF"),
     "Cypher":    ("117ed9e3-49f3-6512-3ccf-0cada7e3823b", SENTINEL,   "#E6D9C5"),
@@ -48,20 +37,17 @@ _AGENTS = {
     "Chamber":   ("22697a3d-45bf-8dd7-4fec-84a9e28c69d7", SENTINEL,   "#B89A46"),
     "Deadlock":  ("cc8b64c8-4b25-4ff9-6e7f-37b4da43d235", SENTINEL,   "#6677B0"),
     "Vyse":      ("efba5359-4016-a1e5-7626-b1ae76895940", SENTINEL,   "#656B8B"),
+    "Veto":      ("92eeef5d-43b5-1d4a-8d03-b3927a09034b", SENTINEL,   "#2E8A96"),
 }
 
 CDN = "https://media.valorant-api.com/agents"
 
-
 def _portrait(uuid: str) -> str:
     return f"{CDN}/{uuid}/displayicon.png"
-
 
 def _full(uuid: str) -> str:
     return f"{CDN}/{uuid}/fullportrait.png"
 
-
-# Public, fully-resolved list of agent objects.
 AGENTS = [
     {
         "name": name,
@@ -74,25 +60,21 @@ AGENTS = [
     for name, (uuid, role, color) in _AGENTS.items()
 ]
 
-# Fast lookups
 AGENT_BY_NAME = {a["name"].lower(): a for a in AGENTS}
 AGENT_BY_UUID = {a["uuid"].lower(): a for a in AGENTS}
 NAME_TO_UUID = {name: uuid for name, (uuid, _r, _c) in _AGENTS.items()}
 UUID_TO_NAME = {uuid.lower(): name for name, (uuid, _r, _c) in _AGENTS.items()}
 
-
 def resolve_agent(identifier: str) -> dict | None:
-    """Resolve an agent by name (case-insensitive) or UUID."""
+    pass
     if not identifier:
         return None
     key = identifier.strip().lower()
     return AGENT_BY_NAME.get(key) or AGENT_BY_UUID.get(key)
 
-
 def role_of(name_or_uuid: str) -> str:
     agent = resolve_agent(name_or_uuid)
     return agent["role"] if agent else "Flex"
-
 
 def color_of(name_or_uuid: str) -> str:
     agent = resolve_agent(name_or_uuid)

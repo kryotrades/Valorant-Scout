@@ -1,4 +1,3 @@
-﻿# update.ps1 — manual full update (run via UPDATE.bat); also called by start.ps1.
 . (Join-Path $PSScriptRoot "common.ps1")
 
 Write-Host ""
@@ -18,3 +17,4 @@ try {
     Fail "Update failed: $($_.Exception.Message)"
     exit 1
 }
+

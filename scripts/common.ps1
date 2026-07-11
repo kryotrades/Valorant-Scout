@@ -1,32 +1,26 @@
-﻿# ---------------------------------------------------------------------------
-# common.ps1 — shared helpers for the Valorant Scout launchers
-# (install.ps1 / start.ps1 / update.ps1). Windows PowerShell 5.1 compatible.
-# ---------------------------------------------------------------------------
 $ErrorActionPreference = "Stop"
 
-$Root     = Split-Path -Parent $PSScriptRoot           # repo root (parent of scripts/)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+$Root     = Split-Path -Parent $PSScriptRoot
 $Repo     = "kryotrades/valorant-scout"
 $VenvDir  = Join-Path $Root ".venv"
 $VenvPy   = Join-Path $VenvDir "Scripts\python.exe"
 $ScoutDir = Join-Path $Root ".scout"
 $EnvFile  = Join-Path $Root "backend\.env"
-# The slim "backend + launcher" download ships without the Next.js frontend and
-# runs against the hosted site, so Node/npm/build steps are skipped.
+
 $HasFrontend = Test-Path (Join-Path $Root "frontend\package.json")
 
-# ---- pretty logging -------------------------------------------------------
 function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
 function Note($m) { Write-Host "  . $m" -ForegroundColor DarkGray }
 function Warn2($m){ Write-Host "  ! $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  x $m" -ForegroundColor Red }
 
-# ---- utilities ------------------------------------------------------------
 function Has-Cmd($name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 
 function Refresh-Path {
-    # Pull the freshly-installed PATH from the registry into this process so
-    # newly installed python/node are visible without a reboot.
+
     $m = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $u = [Environment]::GetEnvironmentVariable("Path", "User")
     $env:Path = (@($m, $u) | Where-Object { $_ }) -join ";"
@@ -55,9 +49,8 @@ function HashOf($rel) {
     return ""
 }
 
-# ---- toolchain detection / install ---------------------------------------
 function Find-Python {
-    # Returns @{Exe; Args} for a python >= 3.10, or $null.
+
     $cands = @(
         @{ Exe = "py";      Args = @("-3") },
         @{ Exe = "python";  Args = @() },
@@ -152,10 +145,7 @@ function Install-PyDeps {
 function Run-Npm([string[]]$npmArgs) {
     Push-Location (Join-Path $Root "frontend")
     try {
-        # Merge npm's stderr into stdout inside cmd so deprecation warnings don't
-        # look like errors, and pipe to Out-Host so npm's output is DISPLAYED but
-        # does NOT become part of this function's return value (otherwise the
-        # caller's `-ne 0` check sees an array of output lines, not the exit code).
+
         cmd /c ("npm " + ($npmArgs -join " ") + " 2>&1") | Out-Host
         return $LASTEXITCODE
     } finally { Pop-Location }
@@ -163,8 +153,7 @@ function Run-Npm([string[]]$npmArgs) {
 
 function Install-NodeDeps {
     Step "Installing frontend packages (npm install) ..."
-    # npm on a freshly-installed Node can fail transiently (network / first-run);
-    # retry, and fall back to --legacy-peer-deps for stubborn peer conflicts.
+
     $tries = @(
         @("install", "--no-fund", "--no-audit"),
         @("install", "--no-fund", "--no-audit"),
@@ -183,7 +172,6 @@ function Build-Frontend {
     Ok "Website built."
 }
 
-# ---- markers / region -----------------------------------------------------
 function Save-Markers($region) {
     if (-not (Test-Path $ScoutDir)) { New-Item -ItemType Directory -Path $ScoutDir | Out-Null }
     $installed = @{
@@ -225,7 +213,6 @@ function Get-SavedRegion {
     return $null
 }
 
-# ---- desktop shortcut -----------------------------------------------------
 function New-DesktopShortcut {
     $desktop = [Environment]::GetFolderPath("Desktop")
     $lnk = Join-Path $desktop "Valorant Scout.lnk"
@@ -243,7 +230,6 @@ function New-DesktopShortcut {
     } catch { Warn2 "Couldn't create the desktop shortcut ($($_.Exception.Message))." }
 }
 
-# ---- update flow (used by update.ps1 and start.ps1) -----------------------
 function Get-LatestRelease {
     try {
         return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
@@ -280,8 +266,6 @@ function Invoke-ScoutUpdate {
         return $false
     }
 
-    # Locate the extracted source root (a GitHub zipball has one top-level dir;
-    # a flat asset zip has backend/ at the top).
     $srcPath = $tmp
     if (-not (Test-Path (Join-Path $tmp "backend"))) {
         $top = Get-ChildItem -Path $tmp -Directory | Select-Object -First 1
@@ -310,7 +294,6 @@ function Invoke-ScoutUpdate {
     }
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
-    # Re-install only what changed, then rebuild the (new) frontend source.
     if ((HashOf "backend\requirements.txt") -ne $reqBefore) { Install-PyDeps }
     if ($HasFrontend) {
         if ((HashOf "frontend\package-lock.json") -ne $lockBefore) { Install-NodeDeps }
@@ -320,3 +303,4 @@ function Invoke-ScoutUpdate {
     Ok "Update complete - now on $($rel.tag_name)."
     return $true
 }
+

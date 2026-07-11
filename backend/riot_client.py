@@ -1,27 +1,7 @@
-"""
-riot_client.py
-==============
-Unified VALORANT data client with three layered data sources and graceful
-degradation between them:
-
-  1. LOCAL   - the unofficial local client API. Instalock calls the pregame
-               select/lock endpoints; the raw lockfile + entitlement auth lives
-               in LocalAuth below. Requires VALORANT to be running on this
-               machine.
-  2. OFFICIAL- the official Riot API (https://*.api.riotgames.com) using
-               RIOT_API_KEY. account-v1 is generally available; val-match-v1
-               requires production approval, so it is attempted and degrades
-               cleanly if Riot returns 403.
-  3. DEMO    - deterministic generated career (sample_data) so the dashboard is
-               always fully populated.
-
-`get_player_overview(puuid)` returns a normalized raw career; app.py then runs
-party_detector + pick_advisor on top of it regardless of source.
-"""
-
 from __future__ import annotations
 
 import base64
+import json
 import os
 import threading
 import time
@@ -36,18 +16,13 @@ from vconstants import GAMEMODES, map_name_from_path, rank_from_tier
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Current client version, cached process-wide (see LocalAuth._client_version).
 _CLIENT_VERSION: str | None = None
 
-# Account-v1 routing cluster per shard.
 _ROUTING = {
     "na": "americas", "latam": "americas", "br": "americas",
     "eu": "europe", "ap": "asia", "kr": "asia",
 }
 
-# Region override -> (pd shard, glz_a, glz_b). The local client API URLs differ
-# per region; we normally auto-detect from ShooterGame.log, but the UI can pin a
-# region (LATAM/BR ride the NA glz cluster).
 REGION_MAP = {
     "na":    ("na",    "na-1", "na"),
     "eu":    ("eu",    "eu-1", "eu"),
@@ -58,39 +33,28 @@ REGION_MAP = {
 }
 REGIONS = ["na", "eu", "ap", "kr", "latam", "br"]
 
-# Riot queue ids -> friendly mode.
 _QUEUE_NAMES = {
     "competitive": "Competitive", "unrated": "Unrated", "swiftplay": "Swiftplay",
     "spikerush": "Spike Rush", "deathmatch": "Deathmatch", "ggteam": "Escalation",
     "hurm": "Team Deathmatch", "": "Custom",
 }
 
-
 def _log(msg: str) -> None:
+    if os.getenv("SCOUT_QUIET"):
+        return
     print(f"[riot_client] {msg}", flush=True)
 
-
-# ---------------------------------------------------------------------------
-# Riot-edge request throttle
-# ---------------------------------------------------------------------------
-# Building the live board can otherwise fire ~60 pd/glz requests in a burst
-# (ranks for 10 players + the background K/D fill, which pulls several match
-# details each), and Riot answers the burst with 429s. A token bucket smooths
-# this ACROSS ALL THREADS: a short burst is allowed (so the first board's rank
-# fetches stay snappy) and sustained load is then paced, so we never fire all
-# ~60 at once. Tunable via RIOT_MAX_RPS (requests/sec; 0 disables throttling).
 _RIOT_RATE_LOCK = threading.Lock()
 try:
-    _RIOT_MAX_RPS = max(0.0, float(os.getenv("RIOT_MAX_RPS", "20")))
+
+    _RIOT_MAX_RPS = max(0.0, float(os.getenv("RIOT_MAX_RPS", "10")))
 except ValueError:
-    _RIOT_MAX_RPS = 20.0
-_RIOT_BURST = _RIOT_MAX_RPS if _RIOT_MAX_RPS > 0 else 1.0   # ~1s worth of burst
+    _RIOT_MAX_RPS = 10.0
+_RIOT_BURST = _RIOT_MAX_RPS if _RIOT_MAX_RPS > 0 else 1.0
 _RIOT_BUCKET = {"tokens": _RIOT_BURST, "at": 0.0}
 
-
 def _riot_throttle() -> None:
-    """Token-bucket gate: returns immediately while burst tokens remain, then
-    paces requests to ~RIOT_MAX_RPS, globally across threads."""
+    pass
     if _RIOT_MAX_RPS <= 0:
         return
     with _RIOT_RATE_LOCK:
@@ -108,33 +72,24 @@ def _riot_throttle() -> None:
         else:
             _RIOT_BUCKET["tokens"] -= 1.0
 
-
-# ---------------------------------------------------------------------------
-# Local auth
-# ---------------------------------------------------------------------------
 class LocalAuth:
-    """
-    Reads the Riot lockfile + ShooterGame.log to authenticate against the local
-    client and the pd/glz edge servers.
-
-    Only usable on a machine where VALORANT is currently running.
-    """
+    pass
 
     def __init__(self, region: str | None = None):
         self.lockfile = self._get_lockfile()
-        # Pin region from the UI/env if given & known, else auto-detect from logs.
+
         region = (region or "").strip().lower()
         if region in REGION_MAP:
             shard, ga, gb = REGION_MAP[region]
             self.region = [shard, [ga, gb]]
         else:
-            self.region = self._get_region()          # (pd_shard, [glz_a, glz_b])
+            self.region = self._get_region()
         self.pd_url = f"https://pd.{self.region[0]}.a.pvp.net"
         self.glz_url = f"https://glz-{self.region[1][0]}.{self.region[1][1]}.a.pvp.net"
         self.shard = self.region[0]
         self._headers: dict | None = None
         self.puuid = ""
-        self.req_count = 0          # pd/glz (Riot edge) requests this instance
+        self.req_count = 0
 
     @staticmethod
     def available() -> bool:
@@ -167,16 +122,30 @@ class LocalAuth:
         raise RuntimeError("could not parse region from ShooterGame.log")
 
     def _client_version(self) -> str:
-        """
-        X-Riot-ClientVersion. Prefer the CURRENT version from valorant-api.com.
-        A stale version makes some `pd` endpoints degrade — notably name-service,
-        which then redacts Incognito names — so using the current version is what
-        keeps hidden names resolvable. Falls back to the log, then a hardcoded
-        default.
-        """
+        pass
         global _CLIENT_VERSION
         if _CLIENT_VERSION:
             return _CLIENT_VERSION
+        try:
+            local = {"Authorization": "Basic " + base64.b64encode(
+                ("riot:" + self.lockfile["password"]).encode()).decode()}
+            data = requests.get(
+                f"https://127.0.0.1:{self.lockfile['port']}/chat/v4/presences",
+                headers=local, verify=False, timeout=5).json()
+            for pr in (data or {}).get("presences", []) or []:
+                if pr.get("product") != "valorant" or not pr.get("private"):
+                    continue
+                try:
+                    priv = json.loads(base64.b64decode(str(pr["private"])).decode("utf-8"))
+                except Exception:
+                    continue
+                v = (priv.get("partyPresenceData") or {}).get("partyClientVersion")                    or priv.get("partyClientVersion")
+                if v:
+                    _CLIENT_VERSION = v
+                    _log(f"client version (local presence): {v}")
+                    return v
+        except Exception as e:
+            _log(f"local presence version lookup failed ({e}); trying valorant-api")
         try:
             data = requests.get("https://valorant-api.com/v1/version", timeout=6).json()
             rcv = (data.get("data") or {}).get("riotClientVersion")
@@ -184,7 +153,7 @@ class LocalAuth:
                 _CLIENT_VERSION = rcv
                 _log(f"client version (valorant-api): {rcv}")
                 return rcv
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _log(f"valorant-api version lookup failed ({e}); using log")
         try:
             path = os.path.join(os.getenv("LOCALAPPDATA", ""),
@@ -194,7 +163,7 @@ class LocalAuth:
                     if "CI server version:" in line:
                         _CLIENT_VERSION = line.split("CI server version: ")[1].strip()
                         return _CLIENT_VERSION
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return "release-09.00"
 
@@ -219,15 +188,15 @@ class LocalAuth:
         }
         return self._headers
 
-    def glz_post(self, endpoint: str) -> requests.Response:
+    def glz_post(self, endpoint: str, json: dict | None = None) -> requests.Response:
         _riot_throttle()
         self.req_count += 1
         return requests.post(self.glz_url + endpoint, headers=self.headers(),
-                             verify=False, timeout=8)
+                             json=json, verify=False, timeout=8)
 
     @staticmethod
     def _json(resp):
-        """Parse JSON, tolerating throttled/empty responses (429 -> '')."""
+        pass
         try:
             return resp.json()
         except ValueError:
@@ -242,26 +211,26 @@ class LocalAuth:
                                        verify=False, timeout=8))
 
     def pd_get(self, endpoint: str, refresh: bool = False, retries: int = 0) -> dict:
-        """
-        GET a pd endpoint. With ``retries`` > 0, a 429 (rate-limited) response is
-        retried in-place with escalating backoff instead of being returned as an
-        empty sentinel — the way VALORANT-rank-yoinker handles throttling. Use it
-        for BACKGROUND work (the K/D fill) so a player's stats resolve even when
-        the burst budget is spent; leave it 0 (the default) for the synchronous
-        board build so that path always returns promptly.
-        """
+        pass
         backoff = 3.0
         for attempt in range(retries + 1):
             _riot_throttle()
             self.req_count += 1
-            data = self._json(requests.get(self.pd_url + endpoint, headers=self.headers(refresh),
-                                            verify=False, timeout=8))
-            if attempt < retries and isinstance(data, dict) and data.get("status") == 429:
-                time.sleep(backoff)
-                backoff += 3.0
-                continue
-            return data
-        return data
+            resp = requests.get(self.pd_url + endpoint, headers=self.headers(refresh),
+                                verify=False, timeout=8)
+            if resp.status_code == 429:
+                if attempt < retries:
+
+                    try:
+                        ra = float(resp.headers.get("Retry-After") or 0)
+                    except (TypeError, ValueError):
+                        ra = 0.0
+                    time.sleep(min(ra or backoff, 30.0))
+                    backoff += 3.0
+                    continue
+                return {"errorCode": "RATE_LIMITED", "status": 429}
+            return self._json(resp)
+        return {"errorCode": "RATE_LIMITED", "status": 429}
 
     def pd_put(self, endpoint: str, payload, refresh: bool = False) -> dict:
         _riot_throttle()
@@ -276,21 +245,116 @@ class LocalAuth:
             f"https://127.0.0.1:{self.lockfile['port']}{endpoint}",
             headers=local, verify=False, timeout=5).json()
 
+def _iso_to_epoch(s: str | None) -> float | None:
+    pass
+    try:
+        dt = datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+        return dt.timestamp() if dt.year >= 2000 else None
+    except Exception:
+        return None
 
-# ---------------------------------------------------------------------------
-# Main client
-# ---------------------------------------------------------------------------
+_PARTY_LOGGED = False
+
+_QUEUE_STARTED: float | None = None
+
+def _self_presence_private(auth: LocalAuth) -> dict | None:
+    pass
+    try:
+        data = auth.local_get("/chat/v4/presences")
+    except Exception:
+        return None
+    for pr in (data or {}).get("presences", []) or []:
+        if pr.get("puuid") != auth.puuid or not pr.get("private"):
+            continue
+        if pr.get("product") not in (None, "valorant"):
+            continue
+        try:
+            priv = json.loads(base64.b64decode(str(pr["private"])).decode("utf-8"))
+            return priv if isinstance(priv, dict) else None
+        except Exception:
+            return None
+    return None
+
+def party_snapshot(auth: LocalAuth) -> dict:
+    pass
+    global _PARTY_LOGGED
+    priv = _self_presence_private(auth)
+    if not priv:
+        return {"available": False}
+    pdata = priv.get("partyPresenceData") or {}
+    pid = pdata.get("partyId") or priv.get("partyId")
+    if not pid:
+        return {"available": False}
+
+    def _label(q):
+        return GAMEMODES.get(q, q.replace("_", " ").title())
+
+    state = pdata.get("partyState") or "DEFAULT"
+    qid = (priv.get("queueId")
+           or (priv.get("matchPresenceData") or {}).get("queueId") or "").lower()
+    snap = {
+        "available": True,
+        "partyId": pid,
+        "queueId": qid or None,
+        "queueName": _label(qid) if qid else None,
+        "eligible": [],
+        "state": state,
+        "inQueue": "MATCHMAKING" in state,
+        "queuedAt": None,
+        "partySize": pdata.get("partySize") or priv.get("partySize") or 1,
+        "isOwner": bool(pdata.get("isPartyOwner", True)),
+        "allReady": True,
+    }
+
+    party = auth.glz_get(f"/parties/v1/parties/{pid}")
+    if isinstance(party, dict) and party.get("Members"):
+        if not _PARTY_LOGGED:
+            _PARTY_LOGGED = True
+            _log(f"party payload keys: {sorted(party.keys())}")
+        members = party.get("Members") or []
+        mine = next((m for m in members if m.get("Subject") == auth.puuid), {})
+        gqid = ((party.get("MatchmakingData") or {}).get("QueueID") or "").lower()
+        if gqid:
+            snap["queueId"], snap["queueName"] = gqid, _label(gqid)
+        if party.get("State"):
+            snap["state"] = party["State"]
+            snap["inQueue"] = "MATCHMAKING" in party["State"]
+        snap["eligible"] = [{"id": q, "name": _label(q)}
+                            for q in (party.get("EligibleQueues") or [])]
+        snap["queuedAt"] = _iso_to_epoch(party.get("QueueEntryTime"))
+        snap["partySize"] = len(members)
+        if "IsOwner" in mine:
+            snap["isOwner"] = bool(mine.get("IsOwner"))
+        snap["allReady"] = all(bool(m.get("IsReady", True)) for m in members)
+    elif isinstance(party, dict) and party.get("status") == 429:
+        snap["throttled"] = True
+
+    global _QUEUE_STARTED
+    if snap["inQueue"]:
+        now = time.time()
+        glz_at = snap["queuedAt"]
+        if glz_at and glz_at <= now:
+            _QUEUE_STARTED = glz_at
+        elif _QUEUE_STARTED is None:
+            _QUEUE_STARTED = now
+        snap["queuedAt"] = _QUEUE_STARTED
+
+        snap["queueElapsed"] = max(0, round(now - _QUEUE_STARTED, 1))
+    else:
+        _QUEUE_STARTED = None
+        snap["queuedAt"] = None
+    return snap
+
 class RiotClient:
     def __init__(self):
         self.api_key = os.getenv("RIOT_API_KEY", "").strip()
         self.region = os.getenv("RIOT_REGION", "na").strip().lower()
         self.source_pref = os.getenv("DATA_SOURCE", "auto").strip().lower()
         self.allow_live_instalock = os.getenv("ALLOW_LIVE_INSTALOCK", "true").lower() == "true"
-        self._valclient = None  # lazy
+        self._valclient = None
 
-    # -- source selection ---------------------------------------------------
     def get_player_overview(self, puuid: str) -> dict:
-        """Return a normalized raw career: identity + rank + matches + source."""
+        pass
         order = {
             "auto": ["local", "official", "demo"],
             "local": ["local"],
@@ -311,17 +375,16 @@ class RiotClient:
                         return data
                 elif src == "demo":
                     return self._demo_overview(puuid)
-            except Exception as e:  # noqa: BLE001 - degrade to next source
+            except Exception as e:
                 last_err = e
                 _log(f"source '{src}' failed: {e}")
-        # If everything above produced nothing, guarantee a response.
+
         _log(f"falling back to demo (last error: {last_err})")
         return self._demo_overview(puuid)
 
-    # -- demo ---------------------------------------------------------------
     def _demo_overview(self, puuid: str) -> dict:
         data = sample_data.generate_player(puuid)
-        # Enrich with the player's real Riot ID if the official account API works.
+
         real_id = self._official_riot_id(puuid) if self.api_key else None
         if real_id:
             data["riotId"] = real_id
@@ -331,7 +394,6 @@ class RiotClient:
             data["sourceDetail"] = "Generated sample career (no live source reachable)"
         return data
 
-    # -- official API -------------------------------------------------------
     def _official_headers(self) -> dict:
         return {"X-Riot-Token": self.api_key}
 
@@ -380,7 +442,6 @@ class RiotClient:
             "sourceDetail": "Official Riot API (val-match-v1)",
         }
 
-    # -- local client (valclient) ------------------------------------------
     def _local_ready(self) -> bool:
         if self.source_pref not in ("auto", "local"):
             return False
@@ -390,12 +451,12 @@ class RiotClient:
         if self._valclient is not None:
             return self._valclient
         try:
-            from valclient.client import Client  # type: ignore
+            from valclient.client import Client
             client = Client(region=self.region)
             client.activate()
             self._valclient = client
             return client
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _log(f"valclient unavailable: {e}")
             self._valclient = False
             return None
@@ -412,7 +473,7 @@ class RiotClient:
                 norm = self._normalize_match(details, puuid)
                 if norm:
                     matches.append(norm)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 _log(f"match detail fetch failed: {e}")
         if not matches:
             return None
@@ -434,7 +495,7 @@ class RiotClient:
             if names:
                 n = names[0]
                 return f"{n.get('GameName')}#{n.get('TagLine')}"
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return "You"
 
@@ -444,11 +505,10 @@ class RiotClient:
             mt = (updates or {}).get("Matches", [])
             if mt:
                 return mt[0].get("TierAfterUpdate", 0), mt[0].get("RankedRatingAfterUpdate", 0)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _log(f"competitive updates failed: {e}")
         return self._latest_tier(matches), 0
 
-    # -- shared match normalizer (handles official + local shapes) ----------
     def _normalize_match(self, raw: dict, subject: str) -> dict | None:
         info = raw.get("matchInfo", raw)
         players = raw.get("players", [])
@@ -524,16 +584,9 @@ class RiotClient:
                 return t
         return 0
 
-    # -- instalock ----------------------------------------------------------
     def instalock(self, agent_identifier: str, mode: str = "lock",
                   dry_run: bool = True, region: str | None = None) -> dict:
-        """
-        One-shot agent select/lock against the local client (region-aware).
-
-        DRY-RUN (default) just reports what it *would* do. Turning dry-run OFF
-        performs the real action — that automates the game client and may
-        violate Riot's Terms of Service; you opt in by disabling dry-run.
-        """
+        pass
         agent = resolve_agent(agent_identifier)
         if not agent:
             return {"ok": False, "status": "error",
@@ -564,16 +617,12 @@ class RiotClient:
                 auth.glz_post(f"/pregame/v1/matches/{match_id}/lock/{agent_uuid}")
             return {"ok": True, "status": "locked", "agent": agent["name"],
                     "message": f"{mode.title()}ed {agent['name']}."}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return {"ok": False, "status": "error",
                     "message": f"Instalock failed: {e}"}
 
-    # -- dodge agent select -------------------------------------------------
     def dodge(self, dry_run: bool = True, region: str | None = None) -> dict:
-        """
-        Leave (dodge) the current agent-select lobby via the pregame quit
-        endpoint. Dry-run unless the request turns it off.
-        """
+        pass
         if dry_run:
             print("[DODGE:DRY-RUN] would quit agent select", flush=True)
             return {"ok": True, "status": "dry-run",
@@ -590,5 +639,115 @@ class RiotClient:
             auth.glz_post(f"/pregame/v1/matches/{match_id}/quit")
             return {"ok": True, "status": "dodged",
                     "message": "Dodged agent select."}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return {"ok": False, "status": "error", "message": f"Dodge failed: {e}"}
+
+    def _party_live(self) -> bool:
+        pass
+        return self.source_pref != "demo" and LocalAuth.available()
+
+    def party_state(self, region: str | None = None) -> dict:
+        pass
+        if not self._party_live():
+            import sample_match
+            return sample_match.demo_queue_state()
+        try:
+            auth = LocalAuth(region)
+            auth.headers()
+            return party_snapshot(auth)
+        except Exception as e:
+            return {"available": False, "message": str(e)}
+
+    def set_queue(self, queue_id: str, dry_run: bool = True,
+                  region: str | None = None) -> dict:
+        pass
+        qid = (queue_id or "").strip().lower()
+        if not qid or qid == "custom":
+            return {"ok": False, "message": f"Unknown gamemode '{queue_id}'."}
+        label = GAMEMODES.get(qid, qid.replace("_", " ").title())
+        if not self._party_live():
+            import sample_match
+            if qid not in GAMEMODES:
+                return {"ok": False, "message": f"Unknown gamemode '{queue_id}'."}
+            return sample_match.demo_queue_set(qid)
+        if dry_run:
+            return {"ok": True, "status": "dry-run",
+                    "message": f"DRY-RUN: would switch to {label}. "
+                               f"Turn dry-run OFF to actually switch."}
+        try:
+            auth = LocalAuth(region)
+            auth.headers()
+            snap = party_snapshot(auth)
+            if not snap.get("available"):
+                return {"ok": False, "message": "Not in a party — is VALORANT "
+                                                "fully loaded into the menus?"}
+            elig = {e["id"] for e in snap.get("eligible") or []}
+            if elig and qid not in elig:
+                return {"ok": False,
+                        "message": f"{label} isn't selectable right now."}
+            r = auth.glz_post(f"/parties/v1/parties/{snap['partyId']}/queue",
+                              json={"queueID": qid})
+            if r.status_code >= 400:
+                return {"ok": False,
+                        "message": f"Riot refused the change (HTTP {r.status_code})."}
+            return {"ok": True, "status": "selected", "queueId": qid,
+                    "message": f"Gamemode set to {label}."}
+        except Exception as e:
+            return {"ok": False, "message": f"Change gamemode failed: {e}"}
+
+    def start_queue(self, dry_run: bool = True, region: str | None = None) -> dict:
+        pass
+        if not self._party_live():
+            import sample_match
+            return sample_match.demo_queue_start()
+        if dry_run:
+            return {"ok": True, "status": "dry-run",
+                    "message": "DRY-RUN: would start the queue. "
+                               "Turn dry-run OFF to actually queue."}
+        try:
+            auth = LocalAuth(region)
+            auth.headers()
+            snap = party_snapshot(auth)
+            if not snap.get("available"):
+                return {"ok": False, "message": "Not in a party — is VALORANT "
+                                                "fully loaded into the menus?"}
+            if snap.get("inQueue"):
+                return {"ok": True, "status": "queued", "inQueue": True,
+                        "message": "Already in queue."}
+            if not snap.get("isOwner"):
+                return {"ok": False, "message": "Only the party owner can start the queue."}
+            if not snap.get("allReady"):
+                return {"ok": False, "message": "Not everyone in the party is ready."}
+            r = auth.glz_post(f"/parties/v1/parties/{snap['partyId']}/matchmaking/join")
+            if r.status_code >= 400:
+                return {"ok": False,
+                        "message": f"Riot refused the queue (HTTP {r.status_code})."}
+            return {"ok": True, "status": "queued", "inQueue": True,
+                    "message": f"Queue started — {snap.get('queueName') or 'matchmaking'}."}
+        except Exception as e:
+            return {"ok": False, "message": f"Start queue failed: {e}"}
+
+    def stop_queue(self, dry_run: bool = True, region: str | None = None) -> dict:
+        pass
+        if not self._party_live():
+            import sample_match
+            return sample_match.demo_queue_stop()
+        if dry_run:
+            return {"ok": True, "status": "dry-run",
+                    "message": "DRY-RUN: would cancel the queue. "
+                               "Turn dry-run OFF to actually cancel."}
+        try:
+            auth = LocalAuth(region)
+            auth.headers()
+            snap = party_snapshot(auth)
+            if not snap.get("available") or not snap.get("inQueue"):
+                return {"ok": True, "status": "idle", "inQueue": False,
+                        "message": "Not in a queue."}
+            r = auth.glz_post(f"/parties/v1/parties/{snap['partyId']}/matchmaking/leave")
+            if r.status_code >= 400:
+                return {"ok": False,
+                        "message": f"Riot refused the cancel (HTTP {r.status_code})."}
+            return {"ok": True, "status": "idle", "inQueue": False,
+                    "message": "Queue cancelled."}
+        except Exception as e:
+            return {"ok": False, "message": f"Cancel queue failed: {e}"}
