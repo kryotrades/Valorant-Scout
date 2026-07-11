@@ -1,45 +1,119 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="Valorant Scout">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">Valorant Scout</title>
+  <desc id="desc">Live match intelligence for VALORANT: ranks, smurf radar, instalock tools and more.</desc>
+
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0A0A0C"/>
-      <stop offset="1" stop-color="#15090B"/>
+      <stop offset="0" stop-color="#08090B"/>
+      <stop offset="0.55" stop-color="#0D0A0D"/>
+      <stop offset="1" stop-color="#16090D"/>
     </linearGradient>
-    <linearGradient id="red" x1="0" y1="0" x2="1" y2="0">
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#FF4655"/>
-      <stop offset="1" stop-color="#D13B47"/>
+      <stop offset="1" stop-color="#FF7A84"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.1" r="0.9">
-      <stop offset="0" stop-color="#FF4655" stop-opacity="0.22"/>
-      <stop offset="0.6" stop-color="#FF4655" stop-opacity="0"/>
+    <radialGradient id="glowLeft" cx="0.16" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF4655" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#FF4655" stop-opacity="0"/>
     </radialGradient>
-    <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse">
-      <path d="M34 0H0V34" fill="none" stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="1"/>
+    <radialGradient id="glowRight" cx="0.92" cy="0.45" r="0.55">
+      <stop offset="0" stop-color="#FF4655" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#FF4655" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="1"/>
     </pattern>
+    <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="panelClip"><rect x="888" y="43" width="252" height="214" rx="18"/></clipPath>
   </defs>
 
   <rect width="1200" height="300" fill="url(#bg)"/>
   <rect width="1200" height="300" fill="url(#grid)"/>
-  <rect width="1200" height="300" fill="url(#glow)"/>
-  <rect x="0" y="0" width="1200" height="4" fill="url(#red)"/>
-  <rect x="0" y="296" width="1200" height="4" fill="url(#red)"/>
+  <rect width="1200" height="300" fill="url(#glowLeft)"/>
+  <rect width="1200" height="300" fill="url(#glowRight)"/>
 
-  <!-- crosshair mark -->
-  <g transform="translate(150 150)" stroke="#FF4655" stroke-width="6" fill="none" stroke-linecap="round">
-    <circle r="54" stroke-opacity="0.35"/>
-    <line x1="-86" y1="0" x2="-30" y2="0"/>
-    <line x1="30" y1="0" x2="86" y2="0"/>
-    <line x1="0" y1="-86" x2="0" y2="-30"/>
-    <line x1="0" y1="30" x2="0" y2="86"/>
-    <circle r="7" fill="#FF4655" stroke="none"/>
+  <!-- angular background language -->
+  <path d="M790 0H1200V300H1030L905 164Z" fill="#FF4655" fill-opacity="0.025"/>
+  <path d="M1075 0H1200V300H1135L1012 166Z" fill="#FF4655" fill-opacity="0.035"/>
+  <path d="M0 0H1200" stroke="#FF4655" stroke-width="4"/>
+  <path d="M0 296H1200" stroke="#FF4655" stroke-opacity="0.75" stroke-width="4"/>
+
+  <!-- brand mark -->
+  <g transform="translate(66 83) scale(2.65)" filter="url(#softGlow)">
+    <path d="M0 0h7.8l13.6 17.5h-8.3z" fill="#FF4655"/>
+    <path d="M30.5 0H39L23.2 22H13.1l-4.8-6.1h11.2z" fill="url(#accent)"/>
+  </g>
+  <rect x="58" y="70" width="115" height="112" rx="22" fill="none" stroke="#FFFFFF" stroke-opacity="0.07"/>
+  <path d="M58 104V82a12 12 0 0 1 12-12h22" fill="none" stroke="#FF4655" stroke-width="2" stroke-linecap="round"/>
+  <path d="M173 148v22a12 12 0 0 1-12 12h-22" fill="none" stroke="#FF4655" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- main lockup -->
+  <text x="205" y="84" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700" letter-spacing="4" fill="#FF6A76">LIVE MATCH INTELLIGENCE</text>
+  <text x="202" y="154" font-family="Arial, Helvetica, sans-serif" font-size="68" font-weight="900" letter-spacing="1.5">
+    <tspan fill="#F7F7F8">VALORANT</tspan><tspan fill="#FF4655"> SCOUT</tspan>
+  </text>
+  <text x="205" y="190" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="500" fill="#A4A4AC">Know the lobby before the round starts.</text>
+
+  <!-- feature chips -->
+  <g font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" letter-spacing="1.4">
+    <g transform="translate(205 215)">
+      <rect width="104" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.055" stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <circle cx="18" cy="17" r="4" fill="#FF4655"/>
+      <text x="31" y="22" fill="#D7D7DC">RANKS</text>
+    </g>
+    <g transform="translate(320 215)">
+      <rect width="142" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.055" stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <circle cx="18" cy="17" r="4" fill="#FF4655"/>
+      <text x="31" y="22" fill="#D7D7DC">SMURF RADAR</text>
+    </g>
+    <g transform="translate(473 215)">
+      <rect width="123" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.055" stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <circle cx="18" cy="17" r="4" fill="#FF4655"/>
+      <text x="31" y="22" fill="#D7D7DC">INSTALOCK</text>
+    </g>
+    <g transform="translate(607 215)">
+      <rect width="134" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.055" stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <circle cx="18" cy="17" r="4" fill="#FF4655"/>
+      <text x="31" y="22" fill="#D7D7DC">ASCII STUDIO</text>
+    </g>
   </g>
 
-  <text x="270" y="150" font-family="'Segoe UI',Arial,sans-serif" font-size="78" font-weight="800" letter-spacing="2">
-    <tspan fill="#F4F4F5">VALORANT</tspan> <tspan fill="#FF4655">SCOUT</tspan>
-  </text>
-  <text x="272" y="194" font-family="'Consolas','Courier New',monospace" font-size="21" letter-spacing="2" fill="#8B8B92">
-    live recon · ranks · smurf radar · instalock · ascii art
-  </text>
-  <text x="272" y="228" font-family="'Segoe UI',Arial,sans-serif" font-size="16" letter-spacing="1" fill="#5C5C63">
-    Flask + Next.js + Rich CLI — reads the local VALORANT client
-  </text>
+  <text x="205" y="272" font-family="Consolas, 'Courier New', monospace" font-size="12" letter-spacing="1.3" fill="#62626A">LOCAL CLIENT  •  PRIVATE BY DESIGN  •  FLASK + NEXT.JS + RICH CLI</text>
+
+  <!-- right HUD panel -->
+  <rect x="888" y="43" width="252" height="214" rx="18" fill="#0B0C0F" fill-opacity="0.88" stroke="#FFFFFF" stroke-opacity="0.09"/>
+  <g clip-path="url(#panelClip)">
+    <rect x="888" y="43" width="252" height="4" fill="url(#accent)"/>
+    <path d="M888 214L1048 43H1140V257H982Z" fill="#FF4655" fill-opacity="0.035"/>
+    <path d="M1020 43V257M1070 43V257M1120 43V257M888 93H1140M888 143H1140M888 193H1140M888 243H1140" stroke="#FFFFFF" stroke-opacity="0.025"/>
+  </g>
+
+  <g font-family="Arial, Helvetica, sans-serif">
+    <circle cx="918" cy="78" r="5" fill="#45F0A8"/>
+    <circle cx="918" cy="78" r="10" fill="none" stroke="#45F0A8" stroke-opacity="0.25"/>
+    <text x="936" y="83" font-size="14" font-weight="800" letter-spacing="2" fill="#EDEDF0">SCOUT ONLINE</text>
+    <text x="918" y="107" font-size="11" letter-spacing="1.6" fill="#6D6D76">LOCAL • REAL-TIME • SECURE</text>
+  </g>
+
+  <!-- radar -->
+  <g transform="translate(1014 172)">
+    <circle r="53" fill="#FF4655" fill-opacity="0.025" stroke="#FFFFFF" stroke-opacity="0.11"/>
+    <circle r="35" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
+    <circle r="17" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
+    <path d="M-53 0H53M0-53V53" stroke="#FFFFFF" stroke-opacity="0.07"/>
+    <path d="M0 0L40-34" stroke="#FF4655" stroke-width="2" stroke-linecap="round"/>
+    <path d="M0 0A53 53 0 0 1 40-34L0 0Z" fill="#FF4655" fill-opacity="0.08"/>
+    <circle cx="24" cy="-20" r="5" fill="#FF4655"/>
+    <circle cx="24" cy="-20" r="10" fill="none" stroke="#FF4655" stroke-opacity="0.25"/>
+    <circle cx="-19" cy="25" r="3.5" fill="#FF7A84"/>
+    <circle cx="5" cy="10" r="3" fill="#FFFFFF" fill-opacity="0.7"/>
+  </g>
+
+  <g font-family="Consolas, 'Courier New', monospace" font-size="10" letter-spacing="1" fill="#74747D">
+    <text x="906" y="239">10 PLAYERS FOUND</text>
+    <text x="1030" y="239" fill="#FF6571">LIVE</text>
+  </g>
 </svg>
