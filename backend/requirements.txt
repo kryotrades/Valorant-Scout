@@ -1,0 +1,9 @@
+Flask>=3.0
+flask-cors>=4.0
+requests>=2.31
+python-dotenv>=1.0
+urllib3>=2.0
+rich>=13.0
+pypresence>=4.3        # Discord Rich Presence (optional; degrades if Discord/lib absent)
+websockets>=12,<14     # local WebSocket bridge for the hosted frontend
+ably>=2.0              # remote/phone mode over Ably (optional; local mode works without it)
