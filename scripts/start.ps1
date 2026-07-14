@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot "common.ps1")
+﻿. (Join-Path $PSScriptRoot "common.ps1")
 
 if (-not (Is-Installed)) {
     Write-Host ""

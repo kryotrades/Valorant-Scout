@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot "common.ps1")
+﻿. (Join-Path $PSScriptRoot "common.ps1")
 
 Write-Host ""
 Write-Host "  VALORANT SCOUT - SETUP" -ForegroundColor Red
@@ -13,7 +13,7 @@ try {
         Install-NodeDeps
         Build-Frontend
     } else {
-        Note "Slim install — no local frontend bundled; the app uses the hosted dashboard."
+        Note "Slim install - no local frontend bundled; the app uses the hosted dashboard."
     }
 
     $regions = @(

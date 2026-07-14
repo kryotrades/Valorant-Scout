@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot "common.ps1")
+﻿. (Join-Path $PSScriptRoot "common.ps1")
 
 Write-Host ""
 Write-Host "  VALORANT SCOUT - UPDATE" -ForegroundColor Red
