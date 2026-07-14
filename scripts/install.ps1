@@ -29,11 +29,15 @@ try {
         Write-Host ("     [{0}] {1}  ({2})" -f ($i + 1), $regions[$i].n, $regions[$i].k)
     }
     $choice = $null
+    $blanks = 0
     while (-not $choice) {
         $r = Read-Host "  Enter a number (1-$($regions.Count))"
         if ($r -match '^\d+$' -and [int]$r -ge 1 -and [int]$r -le $regions.Count) {
             $choice = $regions[[int]$r - 1]
-        } else { Warn2 "Please enter a number between 1 and $($regions.Count)." }
+        } elseif (-not $r) {
+            # ponytail: Read-Host returns "" instantly on redirected/exhausted stdin - bail instead of looping forever
+            if (++$blanks -ge 5) { throw "No region was selected. Run install.bat again and enter a number (1-$($regions.Count))." }
+        } else { $blanks = 0; Warn2 "Please enter a number between 1 and $($regions.Count)." }
     }
     Set-Region $choice.k
     Ok "Region saved: $($choice.n) ($($choice.k))."
