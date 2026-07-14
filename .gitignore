@@ -28,7 +28,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Owner-only ops (data-service schema, etc.)
 ops/
 
 # Claude Code local config
