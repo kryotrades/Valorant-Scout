@@ -1,4 +1,5 @@
 ﻿$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -79,14 +80,18 @@ function Find-Node {
 
 function Install-Python {
     Step "Installing Python 3.12 ..."
+    $ok = $false
     if (Has-Cmd "winget") {
         winget install -e --id Python.Python.3.12 --scope user --silent `
             --accept-source-agreements --accept-package-agreements
-    } else {
+        $ok = ($LASTEXITCODE -eq 0)
+        if (-not $ok) { Warn2 "winget couldn't install Python - falling back to the python.org installer." }
+    }
+    if (-not $ok) {
         $url = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
         $tmp = Join-Path $env:TEMP "python-3.12.7-amd64.exe"
-        Note "winget unavailable; downloading $url"
-        Invoke-WebRequest -Uri $url -OutFile $tmp
+        Note "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $tmp -TimeoutSec 600
         Start-Process -FilePath $tmp -Wait -ArgumentList `
             "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_launcher=1"
     }
@@ -95,14 +100,18 @@ function Install-Python {
 
 function Install-Node {
     Step "Installing Node.js LTS ..."
+    $ok = $false
     if (Has-Cmd "winget") {
-        winget install -e --id OpenJS.NodeJS.LTS --scope user --silent `
+        winget install -e --id OpenJS.NodeJS.LTS --silent `
             --accept-source-agreements --accept-package-agreements
-    } else {
+        $ok = ($LASTEXITCODE -eq 0)
+        if (-not $ok) { Warn2 "winget couldn't install Node.js - falling back to the nodejs.org installer (may need admin rights)." }
+    }
+    if (-not $ok) {
         $url = "https://nodejs.org/dist/v20.17.0/node-v20.17.0-x64.msi"
         $tmp = Join-Path $env:TEMP "node-v20.17.0-x64.msi"
-        Note "winget unavailable; downloading $url"
-        Invoke-WebRequest -Uri $url -OutFile $tmp
+        Note "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $tmp -TimeoutSec 600
         Start-Process -FilePath "msiexec.exe" -Wait -ArgumentList "/i `"$tmp`" /qn /norestart"
     }
     Refresh-Path
@@ -199,7 +208,7 @@ function Is-Installed {
 function Set-Region($region) {
     $lines = @()
     if (Test-Path $EnvFile) {
-        $lines = Get-Content $EnvFile | Where-Object { $_ -notmatch '^\s*RIOT_REGION\s*=' }
+        $lines = Get-Content $EnvFile -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*RIOT_REGION\s*=' }
     }
     $lines += "RIOT_REGION=$region"
     Write-FileNoBom $EnvFile (($lines -join "`r`n") + "`r`n")
@@ -207,7 +216,7 @@ function Set-Region($region) {
 
 function Get-SavedRegion {
     if (Test-Path $EnvFile) {
-        $m = (Get-Content $EnvFile | Select-String -Pattern '^\s*RIOT_REGION\s*=\s*(.+)$')
+        $m = (Get-Content $EnvFile -Encoding UTF8 | Select-String -Pattern '^\s*RIOT_REGION\s*=\s*(.+)$')
         if ($m) { return $m.Matches[0].Groups[1].Value.Trim() }
     }
     return $null
@@ -258,7 +267,7 @@ function Invoke-ScoutUpdate {
     New-Item -ItemType Directory -Path $tmp | Out-Null
     $zip = Join-Path $tmp "release.zip"
     try {
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -Headers @{ "User-Agent" = "valorant-scout" }
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -Headers @{ "User-Agent" = "valorant-scout" } -TimeoutSec 120
         Expand-Archive -Path $zip -DestinationPath $tmp -Force
     } catch {
         Fail "Download/extract failed: $($_.Exception.Message)"
@@ -289,6 +298,7 @@ function Invoke-ScoutUpdate {
     robocopy $srcPath $Root /E /XD @excludeDirs /XF $EnvFile /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) {
         Fail "Applying the update failed (robocopy $LASTEXITCODE)."
+        Write-FileNoBom (Join-Path $Root "VERSION") "$local`r`n"
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
         return $false
     }

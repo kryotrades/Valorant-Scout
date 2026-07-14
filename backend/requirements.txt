@@ -7,3 +7,4 @@ rich>=13.0
 pypresence>=4.3        # Discord Rich Presence (optional; degrades if Discord/lib absent)
 websockets>=12,<14     # local WebSocket bridge for the hosted frontend
 ably>=2.0              # remote/phone mode over Ably (optional; local mode works without it)
+valclient>=2.28        # local Riot client API (career/match-history endpoints)

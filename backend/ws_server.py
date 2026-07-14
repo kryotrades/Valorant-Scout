@@ -273,9 +273,10 @@ def _spawn_opener(frontend_url: str, url: str) -> None:
             except Exception:
                 time.sleep(1.0)
         try:
-            webbrowser.open(url)
+            if not webbrowser.open(url):
+                _log(f"couldn't open your browser automatically — paste this URL into it: {url}")
         except Exception:
-            pass
+            _log(f"couldn't open your browser automatically — paste this URL into it: {url}")
         if not opened:
             _log("opened dashboard (frontend health unconfirmed — "
                  "if the page errors, retry once it's up).")

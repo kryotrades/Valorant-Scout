@@ -126,6 +126,50 @@ def wait_http(url: str, timeout: float, label: str) -> bool:
     warn(f"{label} did not respond at {url} within {int(timeout)}s.")
     return False
 
+def _pid_exe(pid: int) -> str:
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(1024)
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return buf.value
+            return ""
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return ""
+
+def _proc_info(pid: int):
+    try:
+        lines = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; "
+             "$p.ExecutablePath; $p.CommandLine; $p.ParentProcessId"],
+            capture_output=True, text=True, timeout=20).stdout.splitlines()
+        lines += ["", "", ""]
+        exe, cmd, ppid = lines[0].strip(), lines[1].strip(), lines[2].strip()
+        return exe, cmd, int(ppid) if ppid.isdigit() else 0
+    except Exception:
+        return "", "", 0
+
+def _is_ours(pid: int) -> bool:
+
+
+    root = str(ROOT).lower()
+    for _ in range(3):
+        exe, cmd, ppid = _proc_info(pid)
+        if root in exe.lower() or root in cmd.lower():
+            return True
+        if not ppid:
+            return False
+        pid = ppid
+    return False
+
 def kill_port(port) -> None:
     pass
     if not IS_WIN:
@@ -150,7 +194,19 @@ def kill_port(port) -> None:
             if pid not in (0, 4, me):
                 pids.add(pid)
     for pid in pids:
-        say(f"Port {port} is held by PID {pid} (stale instance?) — killing it.", C_DIM)
+
+
+
+
+
+        exe = _pid_exe(pid)
+        if not (exe.lower().startswith(str(ROOT).lower()) or _is_ours(pid)):
+            raise RuntimeError(
+                f"Port {port} is already in use by "
+                f"{exe or f'another program (PID {pid})'}.\n"
+                f"Close that program, or set BACKEND_PORT / WS_PORT to a free port "
+                f"in backend\\.env and start again.")
+        say(f"Port {port} is held by a previous Valorant Scout instance (PID {pid}) — closing it.", C_DIM)
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -269,7 +325,7 @@ def main():
                 if not (FRONTEND / ".next").exists():
                     say("Building frontend for production (first run can take a minute)…")
                     subprocess.run([npm, "run", "build"], cwd=str(FRONTEND), env=child_env,
-                                   shell=IS_WIN, check=False)
+                                   shell=IS_WIN, check=True)
                 say(f"Starting frontend (production) → http://localhost:{frontend_port}")
                 procs.append(subprocess.Popen([npm, "run", "start"], cwd=str(FRONTEND), env=child_env,
                                               shell=IS_WIN, **_hidden_window()))
@@ -319,5 +375,34 @@ def main():
                     pass
         say("Bye.", C_DIM)
 
+def _report_crash():
+
+    import traceback
+    tb = traceback.format_exc()
+    print(tb, file=sys.stderr)
+    log = ROOT / ".scout" / "crash.log"
+    try:
+        log.parent.mkdir(exist_ok=True)
+        log.write_text(tb, encoding="utf-8")
+    except Exception:
+        pass
+    if IS_WIN and "--prod" in sys.argv:
+        try:
+            import ctypes
+            last = tb.strip().splitlines()[-1]
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                f"Valorant Scout couldn't start.\n\n{last}\n\n"
+                f"Details were saved to:\n{log}",
+                "Valorant Scout", 0x10)
+        except Exception:
+            pass
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        _report_crash()
+        sys.exit(1)

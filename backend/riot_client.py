@@ -100,7 +100,7 @@ class LocalAuth:
     def _get_lockfile(self) -> dict:
         path = os.path.join(os.getenv("LOCALAPPDATA", ""),
                             r"Riot Games\Riot Client\Config\lockfile")
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             keys = ["name", "PID", "port", "password", "protocol"]
             return dict(zip(keys, f.read().split(":")))
 
