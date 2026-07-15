@@ -1,9 +1,10 @@
 ﻿. (Join-Path $PSScriptRoot "common.ps1")
 
-# This console is VISIBLE (start.bat runs us directly): show a clean, branded
-# progress display and keep the internals in launcher.log. Startup NEVER
-# installs anything - it validates fast (offline), auto-applies any pending
-# update, then hands off to run.py detached+hidden and closes itself.
+# This console is VISIBLE (start.bat runs us directly) and it IS the app's
+# window: a clean branded progress display, then run.py takes over inline and
+# the scoreboard renders right here - one window for everything. Internals go
+# to launcher.log. Startup NEVER installs anything - it validates fast
+# (offline) and auto-applies any pending update before launching.
 
 # ---- friendly one-line progress bar ----------------------------------------
 # CP437-safe glyphs only (block chars exist in the OEM codepage), PS 5.1-safe
@@ -89,29 +90,17 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
 Show-Phase 3 "Starting Valorant Scout..."
 Stop-RunningApp "launcher" | Out-Null
 
-# ---- 4/4 hand off to run.py (detached + hidden) ------------------------------
-# run.py owns the app lifecycle from here (instance mutex, crash dialogs, the
-# scoreboard window). Detached so this console can close; hidden because the
-# scoreboard IS the app's face. VS_PREVALIDATED skips run.py re-running the
-# dependency probes Test-Venv just ran.
+# ---- 4/4 hand off to run.py INLINE (single-window mode) ----------------------
+# run.py runs IN THIS CONSOLE: it stays quiet (VS_ATTACHED_CLI routes its chatter
+# to launcher.log), starts the backend invisibly, and opens the scoreboard right
+# here - the progress bar simply becomes the scoreboard. Closing this window
+# closes the whole app. VS_PREVALIDATED skips run.py re-running the dependency
+# probes Test-Venv just ran.
+Finish-Progress "Opening the scoreboard..."
 $env:VS_PREVALIDATED = "1"
-$stateFile = Join-Path $ScoutDir "runtime-state.json"
-$before = $null
-if (Test-Path $stateFile) { $before = (Get-Item $stateFile).LastWriteTimeUtc }
-Start-Process -FilePath $VenvPy -ArgumentList @("`"$(Join-Path $Root 'run.py')`"", "--prod") `
-    -WorkingDirectory $Root -WindowStyle Hidden
-Write-ScoutLog -Log launcher -Message "run.py launched detached"
-
-# Hold the console just until run.py signs in (it writes runtime-state.json
-# early, right around when the scoreboard window opens).
-$deadline = (Get-Date).AddSeconds(12)
-while ((Get-Date) -lt $deadline) {
-    if (Test-Path $stateFile) {
-        $now = (Get-Item $stateFile).LastWriteTimeUtc
-        if ($null -eq $before -or $now -gt $before) { break }
-    }
-    Start-Sleep -Milliseconds 250
-}
-Finish-Progress "Scoreboard opening - this window closes itself."
-Start-Sleep -Milliseconds 900
-exit 0
+$env:VS_ATTACHED_CLI = "1"
+Write-ScoutLog -Log launcher -Message "handing this console to run.py (attached single-window mode)"
+& $VenvPy (Join-Path $Root "run.py") --prod
+$code = $LASTEXITCODE
+Write-ScoutLog -Log launcher -Message "run.py exited with code $code"
+exit $code

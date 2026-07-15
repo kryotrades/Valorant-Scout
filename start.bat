@@ -2,9 +2,9 @@
 title Valorant Scout
 if not exist "%~dp0.scout\installed.json" goto :notinstalled
 if not exist "%~dp0.venv\Scripts\python.exe" goto :notinstalled
-rem Run the launcher VISIBLY in this console: start.ps1 shows a clean branded
-rem progress bar, then hands off to run.py detached+hidden and this window
-rem closes on its own (the scoreboard window is the app's face).
+rem One window for everything: start.ps1 shows a branded progress bar in THIS
+rem console, then the scoreboard renders right here. Closing this window
+rem closes the whole app.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
 exit /b %errorlevel%
 

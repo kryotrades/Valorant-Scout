@@ -95,10 +95,21 @@ C_OK = "\033[38;5;78m"
 C_WARN = "\033[38;5;214m"
 C_END = "\033[0m"
 
+# Attached single-console mode (start.ps1 sets this): the scoreboard renders in
+# THE SAME console we run in, so our own chatter must stay off the screen —
+# it goes to launcher.log instead.
+ATTACHED = os.environ.get("VS_ATTACHED_CLI", "").strip() == "1"
+
 def say(msg, color=C_TEAL):
+    if ATTACHED:
+        LOG.info("%s", msg)
+        return
     print(f"{color}» {msg}{C_END}", flush=True)
 
 def warn(msg):
+    if ATTACHED:
+        LOG.warning("%s", msg)
+        return
     print(f"{C_WARN}! {msg}{C_END}", flush=True)
 
 def die(code: str, msg: str) -> "NoReturn":
@@ -535,7 +546,11 @@ def spawn_cli_window(py: str):
     extra = [a for a in sys.argv[1:] if a not in ("--cli", "--no-cli", "--prod")]
     cli = str(ROOT / "cli.py")
     try:
-        if IS_WIN:
+        if IS_WIN and ATTACHED:
+            # Single-window mode: the scoreboard renders in OUR console (the
+            # one start.bat opened with the progress bar) — no new window.
+            proc = subprocess.Popen([py, cli, *extra])
+        elif IS_WIN:
             proc = subprocess.Popen([py, cli, *extra],
                                     creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
@@ -551,6 +566,40 @@ def spawn_cli_window(py: str):
         warn(f"Couldn't open the terminal scoreboard ({e}). "
              f"Run it manually with: python run.py --cli")
         return None
+
+# Pids the console-close handler must take down with us (backend). In attached
+# mode the whole stack shares ONE console; clicking X sends CTRL_CLOSE_EVENT to
+# every attached process, but the backend (own process group, may ignore it)
+# gets force-killed here so it can never orphan. The handler has a ~5s budget.
+_CTRL_KILL_PIDS: list[int] = []
+_CTRL_HANDLER_REF = None  # keep the ctypes callback alive (GC would unhook it)
+
+def _install_console_close_handler() -> None:
+    if not (IS_WIN and ATTACHED):
+        return
+    global _CTRL_HANDLER_REF
+    try:
+        import ctypes
+        from ctypes import wintypes
+        HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+        def _handler(event):
+            # CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6
+            if event in (2, 5, 6):
+                for pid in list(_CTRL_KILL_PIDS):
+                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    release_instance_lock()
+                    clear_runtime_state()
+                except Exception:
+                    pass
+            return False  # let the default handler terminate us
+
+        _CTRL_HANDLER_REF = HandlerRoutine(_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_CTRL_HANDLER_REF, True)
+    except Exception:
+        LOG.debug("couldn't install console close handler", exc_info=True)
 
 def shutdown(procs, grouped=()) -> None:
     """Ask children to exit, then force the stragglers. Budget: < 4s total —
@@ -612,9 +661,10 @@ def main():
                       "Close the app or wait for install/update to finish, then try again.")
         return
 
-    print(f"{C_RED}{'='*58}{C_END}")
-    print(f"{C_RED}  VALORANT SCOUT{C_END}  {C_DIM}web + terminal · live scoreboard · instalock{C_END}")
-    print(f"{C_RED}{'='*58}{C_END}")
+    if not ATTACHED:
+        print(f"{C_RED}{'='*58}{C_END}")
+        print(f"{C_RED}  VALORANT SCOUT{C_END}  {C_DIM}web + terminal · live scoreboard · instalock{C_END}")
+        print(f"{C_RED}{'='*58}{C_END}")
 
     source = os.environ.get("DATA_SOURCE", "auto")
     say("Live scoreboard reads your LOCAL VALORANT client — open the game and")
@@ -679,6 +729,8 @@ def main():
         roles[backend_proc] = "backend"
         if IS_WIN:
             grouped.add(backend_proc)
+        _CTRL_KILL_PIDS.append(backend_proc.pid)
+        _install_console_close_handler()
 
         # Open the scoreboard window IMMEDIATELY — cli.py reads the Valorant
         # client directly (it doesn't need our backend), and its startup banner
@@ -729,7 +781,8 @@ def main():
         if not local_frontend:
             say("Your browser may ask to allow local-network access — click Allow.", C_WARN)
 
-        print(f"\n{C_OK}Web app + terminal scoreboard running. Press Ctrl+C to stop.{C_END}\n")
+        if not ATTACHED:
+            print(f"\n{C_OK}Web app + terminal scoreboard running. Press Ctrl+C to stop.{C_END}\n")
         stop = False
         while not stop:
             time.sleep(0.5)
