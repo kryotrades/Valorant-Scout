@@ -218,6 +218,11 @@ try {
     Step "Extracting the download ..."
     $extract = Join-Path $staging "tree"
     Expand-Archive -Path $zip -DestinationPath $extract -Force
+    # Canonical LONG path: $env:TEMP can be a DOS 8.3 short path (Windows
+    # Sandbox: WDAGUT~1), while Get-ChildItem returns long FullNames — a
+    # Substring against the short prefix cuts the wrong byte count and mangles
+    # every relative path.
+    $extract = (Get-Item -LiteralPath $extract).FullName
     # Files live at the zip root. Tolerate an older single-folder layout too, so
     # a release built the old way still applies.
     $newRoot = $extract
@@ -245,10 +250,10 @@ try {
         }
     }
     # The app's files = every file in the extracted release tree (relative
-    # paths). We replace exactly those; user data is never in the zip.
-    $newFiles = @(Get-ChildItem -Path $newRoot -Recurse -File | ForEach-Object {
-        $_.FullName.Substring($newRoot.Length).TrimStart('\')
-    })
+    # paths). -Name yields RELATIVE paths directly — never Substring against
+    # $newRoot: a short-path prefix (8.3 TEMP) vs long FullNames would cut the
+    # wrong byte count and mangle every path.
+    $newFiles = @(Get-ChildItem -Path $newRoot -Recurse -File -Name | ForEach-Object { [string]$_ })
     if ($newFiles.Count -lt 20) { throw "the downloaded release looks incomplete ($($newFiles.Count) files)." }
     Ok "Download extracted ($($newFiles.Count) files, v$newVersion)."
 
@@ -298,6 +303,11 @@ try {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
             Copy-Item -Force $src $dst
         }
+        # NB: overwriting the running start.bat/UPDATE.bat in place is SAFE only
+        # because those .bat files put their PowerShell hand-off and exit on a
+        # single line (`powershell ... & exit /b`) — cmd reads that whole line
+        # into memory before running it, so it never reopens the file at a stale
+        # byte offset afterwards. Do not split that line.
 
         $state.phase = "validate"
         Write-UpdateState $state
