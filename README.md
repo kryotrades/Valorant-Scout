@@ -96,11 +96,13 @@ are never touched. ARM64 and 32-bit Windows are not supported.
    the exact Python runtime, installs pinned packages, asks you to **pick your region**, and drops
    a **Valorant Scout** shortcut on your Desktop. Safe to re-run any time — it only fixes what's
    broken and never touches your settings or data.
-3. Double-click **`start.bat`** (or the Desktop shortcut) any time to launch. Startup **never
-   installs or updates anything** — it validates fast (works offline) and tells you if a newer
-   release exists.
-   - `UPDATE.bat` applies updates: staged, checksum-verified, and rolled back automatically if
-     anything fails. Your settings, region and match data are always preserved.
+3. Double-click **`start.bat`** (or the Desktop shortcut) any time to launch. It **keeps itself
+   up to date automatically**: every launch checks for a newer release and, if there is one,
+   installs it (staged, checksum-verified, and rolled back automatically if anything fails)
+   **before** starting — so you're always on the latest version. Offline or GitHub unreachable?
+   It just launches your current version and tries again next time. Your settings, region and
+   match data are always preserved.
+   - `UPDATE.bat` does the same update on demand (e.g. to update without relaunching).
    - Something not working? Just run `install.bat` again — it repairs a broken setup in place
      without touching your settings or data.
    - Logs live in the `.scout` folder (`launcher.log`, `backend.log`, `install.log`, …).
@@ -215,12 +217,14 @@ Huge thanks to all of them. ❤️
 
 ## 🔄 Updating
 
-`start.bat` performs a bounded update **check** on launch and tells you when a new release exists —
-it never modifies your installation. `UPDATE.bat` applies updates as a **verified transaction**:
-the release is downloaded to a staging folder, its SHA-256 checksums and file manifest are
-verified, the current version is backed up, the new one is activated and boot-checked, and on any
-failure the previous version is restored automatically. Your settings (`backend/.env`), match data
-(`backend/data`) and logs (`.scout`) are never part of the transaction.
+`start.bat` **auto-updates on every launch**: it checks for a newer release and, if one exists,
+applies it before starting the app (offline or GitHub unreachable → it just launches your current
+version and retries next time). `UPDATE.bat` runs the same thing on demand. Either way the update
+is a **verified transaction**: the release is downloaded to a staging folder, its SHA-256 checksums
+and file manifest are verified, the current version is backed up, the new one is activated and
+boot-checked, and on any failure the previous version is restored automatically. Your settings
+(`backend/.env`), match data (`backend/data`) and logs (`.scout`) are never part of the transaction.
+(On a developer checkout — a `.git` folder present — auto-update is skipped; use `git pull`.)
 
 **Cutting a release (maintainers):** bump `VERSION` **and** `runtime.json` (checked by
 `scripts/verify-version.ps1`), commit, run `scripts/build-release.ps1 -Version <v> -Output dist`,

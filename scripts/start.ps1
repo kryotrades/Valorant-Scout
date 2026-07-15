@@ -29,14 +29,35 @@ if (-not $venv.Ok) {
     exit 1
 }
 
-# Bounded update CHECK — notify only, never applies. Offline-safe (8s cap).
-try {
-    $tag = Test-UpdateAvailable
-    if ($tag) {
-        Write-ScoutLog -Log launcher -Message "update available: $tag (run UPDATE.bat to apply)"
-        $env:VS_UPDATE_AVAILABLE = $tag
+# Auto-update (always on — not a toggle): every launch checks GitHub for a newer
+# release and, if there is one, applies it as a verified transaction BEFORE
+# launching, so users are always on the latest version. It degrades safely — a
+# failed check (offline, GitHub down) or a failed update (rolled back) just falls
+# through to launching the current version, which then retries next launch. The
+# GitHub check is bounded (8s); the update itself only runs when one exists.
+# Skipped on a developer checkout (.git present): there, updates come from git,
+# and update.ps1 refuses to overwrite a checkout anyway.
+if (-not (Test-Path (Join-Path $Root ".git"))) {
+    try {
+        $tag = Test-UpdateAvailable
+        if ($tag) {
+            Write-ScoutLog -Log launcher -Message "update $tag available - applying before launch"
+            Step "A new version ($tag) is available - updating before launch ..."
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "update.ps1")
+            if ($LASTEXITCODE -eq 0) {
+                Write-ScoutLog -Log launcher -Message "auto-update finished - now on v$(Get-LocalVersion)"
+                Ok "Updated to the latest version (v$(Get-LocalVersion))."
+            } else {
+                # Rolled back or couldn't apply; launch anyway and let the UI nudge.
+                $env:VS_UPDATE_AVAILABLE = $tag
+                Write-ScoutLog -Log launcher -Level WARN -Message "auto-update to $tag failed (rc=$LASTEXITCODE); launching current version"
+                Warn2 "Couldn't install the update automatically - starting your current version. It'll try again next launch."
+            }
+        }
+    } catch {
+        Write-ScoutLog -Log launcher -Message "update check/apply skipped: $($_.Exception.Message)"
     }
-} catch { }
+}
 
 # Single-instance: if a previous copy is still running, close it and take over
 # (relaunching replaces the old instance instead of refusing to start).
