@@ -90,8 +90,9 @@ are never touched. ARM64 and 32-bit Windows are not supported.
 
 1. **Download the latest release ZIP** from the
    [Releases page](https://github.com/kryotrades/valorant-scout/releases/latest)
-   (`valorant-scout-v<version>-windows-source.zip`) and **extract it** anywhere
-   (right-click → Extract All — don't run it from inside the ZIP).
+   (`valorant-scout-v<version>.zip`) and **extract it** anywhere (right-click →
+   Extract All — don't run it from inside the ZIP). Everything lands in one
+   folder; `install.bat` and `start.bat` are right there inside it.
 2. Double-click **`install.bat`** — one-time setup **and** repair tool. It verifies (or installs)
    the exact Python runtime, installs pinned packages, asks you to **pick your region**, and drops
    a **Valorant Scout** shortcut on your Desktop. Safe to re-run any time — it only fixes what's
@@ -230,7 +231,7 @@ auto-update is skipped; use `git pull`.)
 **Cutting a release (maintainers):** bump `VERSION` **and** `runtime.json` (checked by
 `scripts/verify-version.ps1`), commit, run `scripts/build-release.ps1 -Version <v> -Output dist`,
 verify with `scripts/verify-release.ps1 -Zip <zip>`, then publish a GitHub Release whose tag matches
-with the single `valorant-scout-v<version>-windows-source.zip` asset. The updater downloads that zip
+with the single `valorant-scout-v<version>.zip` asset. The updater downloads that zip
 over HTTPS and refuses a release that doesn't contain it.
 
 ## 📜 License

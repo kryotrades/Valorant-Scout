@@ -17,16 +17,12 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $work)
 
-    # Exactly one root folder: valorant-scout-v<version>
-    $roots = @(Get-ChildItem -Path $work -Directory)
-    if ($roots.Count -ne 1 -or $roots[0].Name -notmatch '^valorant-scout-v(.+)$') {
-        Fail "zip must contain a single 'valorant-scout-v<version>' root folder."; exit 1
+    # Files live at the zip root (no inner folder).
+    $tree = $work
+    if (-not (Test-Path (Join-Path $tree "VERSION"))) {
+        Fail "zip must contain the app files at its root (VERSION not found)."; exit 1
     }
-    $tree = $roots[0].FullName
-    $version = $Matches[1]
-    if ((Get-Content (Join-Path $tree "VERSION") -Raw).Trim() -ne $version) {
-        Fail "VERSION inside the zip != the root-folder version ($version)."; exit 1
-    }
+    $version = (Get-Content (Join-Path $tree "VERSION") -Raw).Trim()
 
     Step "Forbidden-content scan ..."
     # Any-depth patterns, in lockstep with $ForbiddenPatterns in build-release.ps1.

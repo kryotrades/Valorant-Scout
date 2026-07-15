@@ -161,7 +161,7 @@ try {
     if ($LocalAssets) {
         if (-not $ExpectVersion) { throw "-LocalAssets requires -ExpectVersion." }
         $newVersion = $ExpectVersion
-        $zipName  = "valorant-scout-v$newVersion-windows-source.zip"
+        $zipName  = "valorant-scout-v$newVersion.zip"
         $zip      = Join-Path $LocalAssets $zipName
         if (-not (Test-Path $zip)) { throw "missing local asset: $zip" }
         Note "Using local assets from $LocalAssets (v$newVersion)."
@@ -176,7 +176,7 @@ try {
         }
         Step "Updating v$(Get-LocalVersion) -> v$newVersion ..."
         # Exact asset name only — never the auto-generated GitHub source zipball.
-        $zipName = "valorant-scout-v$newVersion-windows-source.zip"
+        $zipName = "valorant-scout-v$newVersion.zip"
         $zipUrl = $null
         foreach ($a in $rel.assets) { if ($a.name -eq $zipName) { $zipUrl = $a.browser_download_url } }
         if (-not $zipUrl) {
@@ -218,7 +218,13 @@ try {
     Step "Extracting the download ..."
     $extract = Join-Path $staging "tree"
     Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $newRoot = Join-Path $extract "valorant-scout-v$newVersion"
+    # Files live at the zip root. Tolerate an older single-folder layout too, so
+    # a release built the old way still applies.
+    $newRoot = $extract
+    if (-not (Test-Path (Join-Path $newRoot "backend"))) {
+        $inner = Join-Path $extract "valorant-scout-v$newVersion"
+        if (Test-Path (Join-Path $inner "backend")) { $newRoot = $inner }
+    }
     if (-not (Test-Path (Join-Path $newRoot "backend")) -or -not (Test-Path (Join-Path $newRoot "VERSION"))) {
         throw "the downloaded release does not contain the expected app files."
     }

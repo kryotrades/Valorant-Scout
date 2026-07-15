@@ -6,7 +6,7 @@
 
 # Builds the public slim release artifact from an explicit ALLOWLIST of
 # tracked files. Produces a single asset the updater consumes:
-#   valorant-scout-v<version>-windows-source.zip   (single root folder)
+#   valorant-scout-v<version>.zip   (files at the zip root, no inner folder)
 # Then verifies its own output by extracting elsewhere and checking it.
 
 . (Join-Path $PSScriptRoot "common.ps1")
@@ -122,25 +122,26 @@ try {
     # The release is a single source zip — no separate manifest or checksum
     # assets. GitHub serves it over HTTPS and the updater boot-checks + rolls
     # back, so a self-referential checksum added no real protection.
+    # includeBaseDirectory = $false: the files live at the ZIP ROOT (no inner
+    # folder). Windows "Extract All" then puts everything straight into one
+    # folder named after the zip, instead of nesting a second folder inside.
     New-Item -ItemType Directory -Force -Path $Output | Out-Null
-    $zipName = "valorant-scout-v$Version-windows-source.zip"
+    $zipName = "valorant-scout-v$Version.zip"
     $zipPath = Join-Path $Output $zipName
     if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
     Step "Zipping $zipName ..."
     [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zipPath,
-        [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
     # ---- self-verify: extract elsewhere and sanity-check --------------------
     Step "Verifying the built artifact (extract + check) ..."
     $verifyDir = Join-Path $work "verify"
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $verifyDir)
-    $vroot = Join-Path $verifyDir $rootFolder
-    if (-not (Test-Path $vroot)) { Fail-Build "zip does not contain the expected root folder '$rootFolder'." }
-    if ((Get-Content (Join-Path $vroot "VERSION") -Raw).Trim() -ne $Version) { Fail-Build "zip VERSION != $Version." }
+    if ((Get-Content (Join-Path $verifyDir "VERSION") -Raw).Trim() -ne $Version) { Fail-Build "zip VERSION != $Version." }
     foreach ($req in @("run.py", "cli.py", "start.bat", "install.bat", "UPDATE.bat",
                        "runtime.json", "backend\app.py", "backend\requirements.txt",
                        "scripts\common.ps1", "scripts\start.ps1", "scripts\update.ps1")) {
-        if (-not (Test-Path (Join-Path $vroot $req))) { Fail-Build "zip missing required file: $req" }
+        if (-not (Test-Path (Join-Path $verifyDir $req))) { Fail-Build "zip missing required file: $req" }
     }
 
     Write-Host ""
