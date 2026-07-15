@@ -367,18 +367,28 @@ def _proc_info(pid: int):
 
 def _is_ours(pid: int) -> bool:
     # Store-Python venvs run the listener as a child of the venv wrapper, so the
-    # ROOT path may only appear on a parent; walk up a few hops.
-    root = str(ROOT).lower()
-    prefix = root.rstrip("\\") + os.sep  # boundary so "<root>-old" can't match
-    for _ in range(3):
-        exe, cmd, ppid = _proc_info(pid)
-        for hay in (exe.lower(), cmd.lower()):
-            if hay == root or prefix in hay:
-                return True
-        if not ppid:
-            return False
-        pid = ppid
-    return False
+    # ROOT path may only appear on a parent; walk up a few hops. The whole walk
+    # happens in ONE powershell call — each spawn costs seconds on a cold
+    # machine and this sits on the startup path. Path goes via env var (no PS
+    # quoting games); prefix ends with \ so "<root>-old" can never match.
+    prefix = (str(ROOT).rstrip("\\") + os.sep).lower()
+    env = os.environ.copy()
+    env["VS_PREFIX"] = prefix
+    ps = (
+        "$cur = %d; foreach ($hop in 1..3) { "
+        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$cur\"; "
+        "if (-not $p) { break }; "
+        "$hay = (\"$($p.ExecutablePath) $($p.CommandLine)\").ToLower(); "
+        "if ($hay.Contains($env:VS_PREFIX)) { 'VS_OURS'; break }; "
+        "if (-not $p.ParentProcessId) { break }; "
+        "$cur = $p.ParentProcessId }" % pid
+    )
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=20, env=env).stdout
+        return "VS_OURS" in out
+    except Exception:
+        return False
 
 def _port_free(port: int) -> bool:
     try:
@@ -411,10 +421,13 @@ def _port_pids(port) -> set[int]:
                 pids.add(pid)
     return pids
 
-def _kill_our_stale(port) -> None:
-    """Kill processes on `port` ONLY if they run from our folder."""
+def _kill_our_stale(port) -> bool:
+    """Kill processes on `port` ONLY if they run from our folder.
+    Returns True if anything was killed (so the caller knows whether waiting
+    for the port to free up is worthwhile at all)."""
     if not IS_WIN:
-        return
+        return False
+    killed = False
     root = str(ROOT).lower()
     prefix = root.rstrip("\\") + os.sep  # boundary so "<root>-old" can't match
     for pid in _port_pids(port):
@@ -424,6 +437,7 @@ def _kill_our_stale(port) -> None:
             LOG.info("closing our stale instance pid=%s on port %s", pid, port)
             subprocess.run(["taskkill", "/PID", str(pid), "/T"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            killed = True
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and not _port_free(port):
                 time.sleep(0.15)
@@ -431,6 +445,7 @@ def _kill_our_stale(port) -> None:
                 LOG.warning("stale pid %s ignored graceful shutdown; forcing it", pid)
                 subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return killed
 
 def choose_port(preferred, label: str, reserved=()) -> int:
     """Return a usable port, preferring `preferred`. Never kills foreign processes."""
@@ -439,11 +454,14 @@ def choose_port(preferred, label: str, reserved=()) -> int:
     if preferred not in reserved and _port_free(preferred):
         return preferred
     if preferred not in reserved:
-        _kill_our_stale(preferred)
-        for _ in range(20):  # taskkill is async — give the socket a moment to free up
-            if _port_free(preferred):
-                return preferred
-            time.sleep(0.25)
+        # Only wait for the port to free up if we actually killed something —
+        # a FOREIGN holder never releases it, and this loop used to burn a
+        # guaranteed 5s per busy port for nothing.
+        if _kill_our_stale(preferred):
+            for _ in range(20):  # taskkill is async — give the socket a moment to free up
+                if _port_free(preferred):
+                    return preferred
+                time.sleep(0.25)
     holder = ""
     if preferred in reserved:
         holder = "another Valorant Scout service"
@@ -682,45 +700,57 @@ def main():
     py = resolve_python()
     validate_runtime(py)
 
-    backend_port = choose_port(os.environ.get("BACKEND_PORT", "5000"), "backend")
-    ws_port = choose_port(os.environ.get("WS_PORT", "7878"), "WebSocket bridge",
-                          reserved={backend_port})
-    frontend_port = os.environ.get("FRONTEND_PORT", "3000")
-
-    local_frontend = has_local_frontend()
-    node = None
-    if local_frontend:
-        node = node_cmd()
-        if not (FRONTEND / "node_modules").exists():
-            die("VS-FRONTEND-001",
-                "frontend/node_modules is missing. Run install.bat -Frontend "
-                "to set up the local frontend first.")
-        frontend_port = str(choose_port(frontend_port, "frontend",
-                                        reserved={backend_port, ws_port}))
-        frontend_url = (os.environ.get("LOCAL_FRONTEND_URL", "").strip()
-                        or f"http://localhost:{frontend_port}").rstrip("/")
-    else:
-        frontend_url = (os.environ.get("FRONTEND_URL", "").strip()
-                        or HOSTED_FRONTEND).rstrip("/")
-        say("No local frontend bundled — using the hosted dashboard.", C_OK)
-        say(f"Dashboard host: {frontend_url}")
-
-    child_env = os.environ.copy()
-    child_env["BACKEND_PORT"] = str(backend_port)
-    child_env["WS_PORT"] = str(ws_port)
-    child_env["FRONTEND_PORT"] = str(frontend_port)
-    child_env["PORT"] = str(frontend_port)
-    child_env["FRONTEND_URL"] = frontend_url
-
-    LOG.info("starting stack: backend=%s ws=%s frontend=%s (%s)",
-             backend_port, ws_port, frontend_port,
-             "local frontend" if local_frontend else "hosted")
-
     procs = []
     roles = {}
     grouped = set()
-    backend_log_fh = backend_output(prod)
+    backend_log_fh = None
     try:
+        # Open the scoreboard IMMEDIATELY — cli.py reads the Valorant client
+        # directly, so it needs neither the backend nor port selection.
+        # Identifying who owns a busy port can take seconds (netstat + WMI);
+        # none of that may delay the scoreboard. The try/finally covers the
+        # spawn, so any startup failure below still tears the window down.
+        if with_cli:
+            cli_proc = spawn_cli_window(py)
+            if cli_proc is not None:
+                procs.append(cli_proc)
+                roles[cli_proc] = "scoreboard"
+
+        backend_port = choose_port(os.environ.get("BACKEND_PORT", "5000"), "backend")
+        ws_port = choose_port(os.environ.get("WS_PORT", "7878"), "WebSocket bridge",
+                              reserved={backend_port})
+        frontend_port = os.environ.get("FRONTEND_PORT", "3000")
+
+        local_frontend = has_local_frontend()
+        node = None
+        if local_frontend:
+            node = node_cmd()
+            if not (FRONTEND / "node_modules").exists():
+                die("VS-FRONTEND-001",
+                    "frontend/node_modules is missing. Run install.bat -Frontend "
+                    "to set up the local frontend first.")
+            frontend_port = str(choose_port(frontend_port, "frontend",
+                                            reserved={backend_port, ws_port}))
+            frontend_url = (os.environ.get("LOCAL_FRONTEND_URL", "").strip()
+                            or f"http://localhost:{frontend_port}").rstrip("/")
+        else:
+            frontend_url = (os.environ.get("FRONTEND_URL", "").strip()
+                            or HOSTED_FRONTEND).rstrip("/")
+            say("No local frontend bundled — using the hosted dashboard.", C_OK)
+            say(f"Dashboard host: {frontend_url}")
+
+        child_env = os.environ.copy()
+        child_env["BACKEND_PORT"] = str(backend_port)
+        child_env["WS_PORT"] = str(ws_port)
+        child_env["FRONTEND_PORT"] = str(frontend_port)
+        child_env["PORT"] = str(frontend_port)
+        child_env["FRONTEND_URL"] = frontend_url
+
+        LOG.info("starting stack: backend=%s ws=%s frontend=%s (%s)",
+                 backend_port, ws_port, frontend_port,
+                 "local frontend" if local_frontend else "hosted")
+
+        backend_log_fh = backend_output(prod)
         write_runtime_state(backend_port, ws_port, frontend_port)
         say(f"Starting backend → http://127.0.0.1:{backend_port}")
         out = {}
@@ -735,15 +765,6 @@ def main():
             grouped.add(backend_proc)
         _CTRL_KILL_PIDS.append(backend_proc.pid)
         _install_console_close_handler()
-
-        # Open the scoreboard window IMMEDIATELY — cli.py reads the Valorant
-        # client directly (it doesn't need our backend), and its startup banner
-        # covers the backend boot so the user never stares at nothing.
-        if with_cli:
-            cli_proc = spawn_cli_window(py)
-            if cli_proc is not None:
-                procs.append(cli_proc)
-                roles[cli_proc] = "scoreboard"
 
         if not wait_http(f"http://127.0.0.1:{backend_port}/api/health", 40, "Backend"):
             tail = tail_backend_log()
