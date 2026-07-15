@@ -152,6 +152,10 @@ def resolve_python() -> str:
 
 def validate_runtime(py: str) -> None:
     """Fast offline check that the installed packages can actually load."""
+    # start.ps1 just ran these exact probes (Test-Venv); don't spend 2-4s
+    # re-running them. Direct `python run.py` (dev) still validates.
+    if os.environ.get("VS_PREVALIDATED", "").strip() == "1":
+        return
     exact = ROOT / "scripts" / "verify_installed.py"
     requirements = BACKEND / "requirements.txt"
     if exact.exists() and requirements.exists():
@@ -193,6 +197,62 @@ def _path_fingerprint() -> str:
 def _mutex_name(purpose: str) -> str:
     return rf"Local\ValorantScout-{purpose}-{_path_fingerprint()}"
 
+def _my_process_tree() -> set[int]:
+    """Our own pid plus a few ancestors. A Store-Python venv runs us as a CHILD
+    of the venv redirector stub — killing the stub (its cmdline also contains
+    run.py) would kill us, so the whole ancestry must be exempt from takeover."""
+    mine = {os.getpid()}
+    pid = os.getpid()
+    for _ in range(4):
+        _, _, ppid = _proc_info(pid)
+        if not ppid:
+            break
+        mine.add(ppid)
+        pid = ppid
+    return mine
+
+def _kill_leftover_instances() -> bool:
+    """Kill a previous run.py of THIS install (and its tree). Returns True if
+    anything was killed. Never touches processes outside this folder."""
+    if not IS_WIN:
+        return False
+    mine = _my_process_tree()
+    pids = set()
+    # Fast path: the old launcher recorded its pid.
+    try:
+        state = json.loads((SCOUT_DIR / "runtime-state.json").read_text(encoding="utf-8"))
+        pid = int(state.get("pid", 0))
+        if pid > 0 and pid not in mine and _is_ours(pid):
+            pids.add(pid)
+    except Exception:
+        pass
+    # Fallback: a mid-shutdown instance may already have removed the state file.
+    # Match "<this folder>\run.py" in the command line — full-path prefix, so a
+    # sibling install can never match. Path goes via env var (no PS quoting games).
+    try:
+        env = os.environ.copy()
+        env["VS_MATCH"] = (str(ROOT).rstrip("\\") + os.sep + "run.py").lower()
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$m = $env:VS_MATCH; Get-CimInstance Win32_Process -Filter "
+             "\"Name like 'py%'\" | Where-Object { $_.CommandLine -and "
+             "$_.CommandLine.ToLower().Contains($m) } | "
+             "ForEach-Object { $_.ProcessId }"],
+            capture_output=True, text=True, timeout=20, env=env).stdout
+        for tok in out.split():
+            if tok.isdigit() and int(tok) not in mine:
+                pids.add(int(tok))
+    except Exception:
+        pass
+    if not pids:
+        return False
+    for pid in pids:
+        say(f"A previous Valorant Scout (PID {pid}) is still closing — taking over.", C_DIM)
+        LOG.info("killing leftover instance pid=%s to take over", pid)
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
 def acquire_instance_lock() -> bool:
     global _INSTANCE_LOCK
     if not IS_WIN:
@@ -209,8 +269,15 @@ def acquire_instance_lock() -> bool:
         # ERROR_ALREADY_EXISTS instead would wrongly refuse an abandoned mutex.
         wait = ctypes.windll.kernel32.WaitForSingleObject(handle, 0)
         if wait not in (0, 0x80):  # not WAIT_OBJECT_0 / WAIT_ABANDONED
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return False
+            # A previous instance still holds the lock (e.g. the user closed the
+            # scoreboard and relaunched immediately). Kill it and take over —
+            # relaunching should always win. The killed owner leaves the mutex
+            # ABANDONED, which wakes this wait instantly.
+            if _kill_leftover_instances():
+                wait = ctypes.windll.kernel32.WaitForSingleObject(handle, 3000)
+            if wait not in (0, 0x80):
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return False
         _INSTANCE_LOCK = handle
         return True
     except Exception:
@@ -486,7 +553,9 @@ def spawn_cli_window(py: str):
         return None
 
 def shutdown(procs, grouped=()) -> None:
-    """Ask children to exit, then escalate only when they ignore us."""
+    """Ask children to exit, then force the stragglers. Budget: < 4s total —
+    closing the scoreboard must feel instant, so one short graceful window
+    (2s) then straight to a tree force-kill."""
     alive = [p for p in procs if p.poll() is None]
     grouped = set(grouped)
     for p in alive:
@@ -501,7 +570,7 @@ def shutdown(procs, grouped=()) -> None:
         except Exception:
             LOG.debug("graceful stop failed for pid %s", p.pid, exc_info=True)
 
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 2
     for p in alive:
         try:
             p.wait(timeout=max(0.05, deadline - time.monotonic()))
@@ -510,21 +579,21 @@ def shutdown(procs, grouped=()) -> None:
 
     stubborn = [p for p in alive if p.poll() is None]
     for p in stubborn:
+        LOG.warning("pid %s ignored graceful shutdown; forcing its process tree", p.pid)
         try:
-            p.terminate()
-        except Exception:
-            pass
-    deadline = time.monotonic() + 2
-    for p in stubborn:
-        try:
-            p.wait(timeout=max(0.05, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
             if IS_WIN:
-                LOG.warning("pid %s ignored graceful shutdown; forcing its process tree", p.pid)
                 subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 p.kill()
+        except Exception:
+            pass
+    deadline = time.monotonic() + 1.5
+    for p in stubborn:
+        try:
+            p.wait(timeout=max(0.05, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
 
 def main():
     load_env()
@@ -610,6 +679,16 @@ def main():
         roles[backend_proc] = "backend"
         if IS_WIN:
             grouped.add(backend_proc)
+
+        # Open the scoreboard window IMMEDIATELY — cli.py reads the Valorant
+        # client directly (it doesn't need our backend), and its startup banner
+        # covers the backend boot so the user never stares at nothing.
+        if with_cli:
+            cli_proc = spawn_cli_window(py)
+            if cli_proc is not None:
+                procs.append(cli_proc)
+                roles[cli_proc] = "scoreboard"
+
         if not wait_http(f"http://127.0.0.1:{backend_port}/api/health", 40, "Backend"):
             tail = tail_backend_log()
             LOG.error("VS-BACKEND-001 backend did not become healthy; last output:\n%s", tail)
@@ -650,15 +729,10 @@ def main():
         if not local_frontend:
             say("Your browser may ask to allow local-network access — click Allow.", C_WARN)
 
-        if with_cli:
-            cli_proc = spawn_cli_window(py)
-            if cli_proc is not None:
-                procs.append(cli_proc)
-                roles[cli_proc] = "scoreboard"
-
         print(f"\n{C_OK}Web app + terminal scoreboard running. Press Ctrl+C to stop.{C_END}\n")
-        while True:
-            time.sleep(1)
+        stop = False
+        while not stop:
+            time.sleep(0.5)
             for p in procs:
                 if p.poll() is None:
                     continue
@@ -673,6 +747,12 @@ def main():
                 if role == "frontend":
                     die("VS-FRONTEND-001",
                         f"The local frontend stopped unexpectedly (exit {p.returncode}).")
+                if role == "scoreboard":
+                    # Closing the scoreboard window IS how users quit the app.
+                    say("Scoreboard closed — shutting down.", C_WARN)
+                    LOG.info("scoreboard window closed; shutting down")
+                    stop = True
+                    break
     except KeyboardInterrupt:
         print()
         say("Shutting down…", C_WARN)
@@ -683,8 +763,11 @@ def main():
                 backend_log_fh.close()
             except OSError:
                 pass
-        clear_runtime_state()
+        # Release the mutex BEFORE clearing the state file: the reverse order
+        # leaves a window where a relauncher sees nothing to kill (no state
+        # file) while the mutex is still held.
         release_instance_lock()
+        clear_runtime_state()
         say("Bye.", C_DIM)
 
 def _report_crash():

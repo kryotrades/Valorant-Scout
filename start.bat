@@ -1,17 +1,12 @@
 @echo off
 title Valorant Scout
-echo.
-echo   Starting Valorant Scout...
-echo   This window closes on its own once the scoreboard opens.
 if not exist "%~dp0.scout\installed.json" goto :notinstalled
 if not exist "%~dp0.venv\Scripts\python.exe" goto :notinstalled
-rem Launch fully hidden: the CLI scoreboard window is the app's face - closing
-rem it stops everything (run.py watches it), so no server console needs to be
-rem visible or in the taskbar. This window flashes once and closes.
-rem Path goes via env var so quotes/apostrophes/& in the folder name can't break parsing.
-set "VS_START=%~dp0scripts\start.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('\"' + $env:VS_START + '\"'))"
-exit /b
+rem Run the launcher VISIBLY in this console: start.ps1 shows a clean branded
+rem progress bar, then hands off to run.py detached+hidden and this window
+rem closes on its own (the scoreboard window is the app's face).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
+exit /b %errorlevel%
 
 :notinstalled
 echo.

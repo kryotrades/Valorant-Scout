@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -62,6 +63,18 @@ from riot_client import LocalAuth
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+if os.name == "nt":
+    # Enable ANSI/VT on our own fresh console (run.py spawns us with
+    # CREATE_NEW_CONSOLE, which starts without it). With VT on, rich uses its
+    # modern renderer instead of the flickery legacy-conhost fallback
+    # (STD_OUTPUT_HANDLE = -11; mode 7 = processed|wrap|virtual-terminal).
+    try:
+        import ctypes
+        _k32 = ctypes.windll.kernel32
+        _k32.SetConsoleMode(_k32.GetStdHandle(-11), 7)
     except Exception:
         pass
 
@@ -233,14 +246,29 @@ def main():
         console.print(render(build_board(args.seed)))
         return
 
+    def board_key(board: dict) -> str:
+        # `session` carries wall-clock timestamps that change every call; the
+        # CLI doesn't render it, so keep it out of the change detection.
+        slim = {k: v for k, v in board.items() if k != "session"}
+        return json.dumps(slim, sort_keys=True, default=str)
+
     try:
         # We redraw on our own interval; auto_refresh would repaint the whole
-        # screen ~4x/s (constant flicker in screen mode) for no benefit.
-        with Live(render(build_board(args.seed)), console=console,
+        # screen ~4x/s (constant flicker in screen mode) for no benefit. And we
+        # only repaint when the board actually CHANGED — a full-screen repaint
+        # of identical content is visible flicker on legacy conhost (Windows
+        # Sandbox, no Windows Terminal).
+        board = build_board(args.seed)
+        prev = board_key(board)
+        with Live(render(board), console=console,
                   screen=True, transient=False, auto_refresh=False) as live:
             while True:
                 time.sleep(max(1.0, args.interval))
-                live.update(render(build_board(args.seed)), refresh=True)
+                board = build_board(args.seed)
+                key = board_key(board)
+                if key != prev:
+                    prev = key
+                    live.update(render(board), refresh=True)
     except KeyboardInterrupt:
         console.print("[grey50]gg — bye.[/]")
 
