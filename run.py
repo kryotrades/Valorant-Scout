@@ -573,6 +573,8 @@ def spawn_cli_window(py: str):
 # gets force-killed here so it can never orphan. The handler has a ~5s budget.
 _CTRL_KILL_PIDS: list[int] = []
 _CTRL_HANDLER_REF = None  # keep the ctypes callback alive (GC would unhook it)
+_CLOSING = False  # set by the close handler; the monitor loop must not treat
+                  # the resulting child deaths as crashes (no error dialog)
 
 def _install_console_close_handler() -> None:
     if not (IS_WIN and ATTACHED):
@@ -586,6 +588,8 @@ def _install_console_close_handler() -> None:
         def _handler(event):
             # CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6
             if event in (2, 5, 6):
+                global _CLOSING
+                _CLOSING = True
                 for pid in list(_CTRL_KILL_PIDS):
                     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -791,6 +795,14 @@ def main():
                     continue
                 role = roles.get(p, "child")
                 if role == "backend":
+                    # Window-X / logoff / shutdown: CTRL_CLOSE kills every
+                    # console-attached process, so the backend dying with
+                    # STATUS_CONTROL_C_EXIT is the app CLOSING, not crashing —
+                    # this loop can observe it before we're terminated ourselves.
+                    if _CLOSING or (ATTACHED and p.returncode in (0xC000013A, -1073741510)):
+                        LOG.info("backend exited with console-close status; shutting down")
+                        stop = True
+                        break
                     tail = tail_backend_log()
                     LOG.error("VS-BACKEND-001 backend exited (code %s); last output:\n%s",
                               p.returncode, tail)

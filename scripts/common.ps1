@@ -451,7 +451,13 @@ function Get-VenvPipVersion {
     return $null
 }
 
-function Test-Venv {
+# -Quick (startup path): file/marker checks only — NO python launches. The five
+# cold python starts below (identity probe, pip --version, pip check,
+# verify_installed, import_smoke) cost 15-25s on a cold machine (Windows
+# Sandbox, Defender scanning), which dwarfs the app's own boot. Install/update/
+# diagnose still run the full battery; a venv quick misses fails loudly at
+# backend start anyway.
+function Test-Venv([switch]$Quick) {
     $mf = Get-RuntimeManifest
     $reasons = @()
 
@@ -495,6 +501,18 @@ function Test-Venv {
                 $reasons += "installation folder moved since the venv was created"
             }
         } catch { }
+    }
+
+    if ($Quick) {
+        $depsFileQ = Join-Path $ScoutDir "deps.json"
+        $recordedQ = ""
+        if (Test-Path $depsFileQ) {
+            try { $recordedQ = (Get-Content $depsFileQ -Raw | ConvertFrom-Json).requirements } catch { }
+        }
+        if (-not $recordedQ -or $recordedQ -ne (HashOf "backend\requirements.txt")) {
+            $reasons += "requirements.txt changed since packages were installed (hash mismatch)"
+        }
+        return @{ Ok = ($reasons.Count -eq 0); Reasons = $reasons }
     }
 
     $id = Get-PythonIdentity $VenvPy @()

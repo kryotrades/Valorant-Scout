@@ -40,7 +40,7 @@ if (-not $markers.Ok) {
     Show-FatalDialog "Valorant Scout can't start: $($markers.Reason).`n`nRun install.bat to repair (your settings and data are kept)." "launcher"
     exit 1
 }
-$venv = Test-Venv
+$venv = Test-Venv -Quick
 if (-not $venv.Ok) {
     Write-Host ""
     $code = "VS-DEPS-001"
