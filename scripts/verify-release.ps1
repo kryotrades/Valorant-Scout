@@ -1,0 +1,87 @@
+﻿param(
+    [Parameter(Mandatory = $true)][string]$Zip,
+    [Parameter(Mandatory = $true)][string]$Checksum,   # SHA256SUMS.txt
+    [string]$Manifest = "",                            # defaults to sibling release-manifest.json
+    [switch]$AllowDirty                                # local test artifacts only
+)
+
+# Independent check of a built artifact: checksums, manifest agreement, safe
+# archive structure, forbidden content, and launcher encodings.
+
+. (Join-Path $PSScriptRoot "common.ps1")
+
+if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent $Zip) "release-manifest.json" }
+foreach ($f in @($Zip, $Checksum, $Manifest)) {
+    if (-not (Test-Path $f)) { Fail "missing: $f"; exit 1 }
+}
+
+$mfJson = Get-Content $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+$version = $mfJson.version
+
+$work = Join-Path $env:TEMP ("vs-verify-" + [Guid]::NewGuid().ToString("N"))
+try {
+    Step "Structural + checksum verification (update_verify.py) ..."
+    $pyExe = $VenvPy
+    if (-not (Test-Path $pyExe)) {
+        $cand = Find-ExactPython
+        if (-not $cand) { Fail "no Python available."; exit 1 }
+        $pyExe = $cand.Exe
+    }
+    $runtime = Get-RuntimeManifest
+    $verifyArgs = @((Join-Path $PSScriptRoot "update_verify.py"), "--zip", $Zip,
+        "--sums", $Checksum, "--manifest", $Manifest, "--dest", $work,
+        "--expect-version", $version, "--expect-python", [string]$runtime.python.version,
+        "--expect-arch", [string]$runtime.python.arch,
+        "--supported-protocol", [string]$runtime.protocol.version)
+    if ($AllowDirty) { $verifyArgs += "--allow-dirty" }
+    & $pyExe @verifyArgs
+    if ($LASTEXITCODE -ne 0) { Fail "artifact verification failed."; exit 1 }
+    Ok "checksums + archive structure + per-file hashes OK."
+
+    $tree = Join-Path $work "valorant-scout-v$version"
+
+    Step "Forbidden-content scan ..."
+    # Any-depth patterns, in lockstep with $ForbiddenPatterns in build-release.ps1
+    # (a root-anchored '^\.venv/' misses a nested 'backend/.venv/').
+    $forbidden = @('(^|/)\.env$', '\.env\.local', '(^|/)frontend/', '(^|/)node_modules/',
+                   '(^|/)__pycache__/', '\.pyc$', '(^|/)\.venv/', '(^|/)\.scout/',
+                   '(^|/)backend/data/', '(^|/)\.next/', '(^|/)\.git/', '(^|/)ops/',
+                   '(^|/)vendor/', '(^|/)tests/', '(^|/)\.github/', '(^|/)\.claude/', 'client_id$')
+    $bad = @()
+    foreach ($file in (Get-ChildItem -Path $tree -Recurse -File)) {
+        $rel = $file.FullName.Substring($tree.Length + 1) -replace '\\', '/'
+        foreach ($fp in $forbidden) { if ($rel -match $fp) { $bad += "$rel ($fp)" } }
+        if ($file.Extension -in @(".py", ".ps1", ".bat", ".md", ".json", ".txt", ".example")) {
+            $content = Get-Content $file.FullName -Raw -Encoding UTF8
+            if ($content -match ('VS-CANARY' + '-SECRET')) { $bad += "$rel (canary secret leaked!)" }
+            if ($content -match '[A-Za-z]:\\Users\\(?!Public)[A-Za-z0-9._ -]+\\') { $bad += "$rel (developer absolute path)" }
+        }
+    }
+    if ($bad.Count -gt 0) { foreach ($b in $bad) { Fail $b }; exit 1 }
+    Ok "no forbidden files, secrets or personal paths."
+
+    Step "Required files + encodings ..."
+    foreach ($req in @("install.bat", "start.bat", "UPDATE.bat", "VERSION",
+                       "runtime.json", "run.py", "cli.py", "backend/requirements.txt",
+                       "backend/app.py", "scripts/common.ps1", "scripts/install.ps1",
+                       "scripts/start.ps1", "scripts/update.ps1", "scripts/diagnose.ps1",
+                       "scripts/import_smoke.py", "scripts/update_verify.py", "release-manifest.json")) {
+        if (-not (Test-Path (Join-Path $tree ($req -replace '/', '\')))) { Fail "required file missing: $req"; exit 1 }
+    }
+    foreach ($file in (Get-ChildItem -Path $tree -Recurse -File -Include *.ps1, *.bat)) {
+        $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+        $text = [System.IO.File]::ReadAllText($file.FullName)
+        if ($file.Extension -eq ".ps1" -and ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF)) {
+            Fail "$($file.Name) is not UTF-8 with BOM."; exit 1
+        }
+        if (($text -replace "`r`n", "") -match "`n") { Fail "$($file.Name) has LF-only line endings."; exit 1 }
+    }
+    if ((Get-Content (Join-Path $tree "VERSION") -Raw).Trim() -ne $version) { Fail "VERSION inside the zip != manifest version."; exit 1 }
+    Ok "required files present, encodings OK, VERSION agrees."
+
+    Write-Host ""
+    Ok "Artifact verified: $Zip (v$version, commit $($mfJson.commit))"
+    exit 0
+} finally {
+    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+}

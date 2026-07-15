@@ -1,6 +1,19 @@
 from __future__ import annotations
 
-APP_VERSION = "1.1"
+from pathlib import Path
+
+def _read_version() -> str:
+    # Single source of truth is the root VERSION file (validated against
+    # runtime.json by scripts/verify-version.ps1); the fallback only covers
+    # running a stray backend/ copy outside a full checkout.
+    try:
+        v = (Path(__file__).resolve().parent.parent / "VERSION").read_text(
+            encoding="utf-8").strip()
+        return v or "1.1"
+    except OSError:
+        return "1.1"
+
+APP_VERSION = _read_version()
 
 MAPS = [
     "Ascent", "Bind", "Haven", "Split", "Lotus", "Sunset",

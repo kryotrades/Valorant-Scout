@@ -13,6 +13,13 @@ backend/data/
 # Per-user launcher markers (created by install.bat / start.bat)
 .scout/
 
+# Release build output + the manifest the updater writes into installed trees
+dist/
+/release-manifest.json
+
+# Not shipped: running install.bat again repairs any issue diagnose.bat reported
+/diagnose.bat
+
 # Node / Next
 frontend/node_modules/
 frontend/.next/

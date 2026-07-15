@@ -28,10 +28,16 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 os.environ["SCOUT_QUIET"] = "1"
 
+# This console is blank while imports/first fetch run — tell the user what it
+# is. Live(screen=True) switches to the alternate buffer, replacing this text.
+print("\n  Starting Valorant Scout...\n  The scoreboard will appear in this window in a moment.", flush=True)
+
 def _load_env():
     for p in (ROOT / ".env", ROOT / "backend" / ".env"):
         if p.exists():
-            for line in p.read_text(encoding="utf-8").splitlines():
+            # utf-8-sig / replace: hand-edited .env with a BOM or stray byte
+            # must not corrupt the first key or crash the CLI at import time.
+            for line in p.read_text(encoding="utf-8-sig", errors="replace").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, _, v = line.partition("=")
@@ -60,6 +66,19 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 console = Console()
+
+def _set_window_title(title: str) -> None:
+    # run.py spawns us in a fresh console with no title, so Windows labels the
+    # window by its host exe (python.exe / conhost) — inconsistent across PCs.
+    try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleTitleW(title)
+        else:
+            sys.stdout.write(f"\33]0;{title}\a")
+            sys.stdout.flush()
+    except Exception:
+        pass
 
 def build_board(seed: int) -> dict:
     pref = os.environ.get("DATA_SOURCE", "auto").lower()
@@ -208,18 +227,35 @@ def main():
 
     args, _ = ap.parse_known_args()
 
+    _set_window_title("Valorant Scout — Scoreboard")
+
     if args.once:
         console.print(render(build_board(args.seed)))
         return
 
     try:
+        # We redraw on our own interval; auto_refresh would repaint the whole
+        # screen ~4x/s (constant flicker in screen mode) for no benefit.
         with Live(render(build_board(args.seed)), console=console,
-                  refresh_per_second=4, screen=True, transient=False) as live:
+                  screen=True, transient=False, auto_refresh=False) as live:
             while True:
                 time.sleep(max(1.0, args.interval))
-                live.update(render(build_board(args.seed)))
+                live.update(render(build_board(args.seed)), refresh=True)
     except KeyboardInterrupt:
         console.print("[grey50]gg — bye.[/]")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        # The CLI runs in its own console that closes on crash — persist the
+        # traceback so the failure is diagnosable afterwards.
+        import traceback
+        try:
+            import scoutlog
+            scoutlog.get_logger("cli").error("crashed:\n%s", traceback.format_exc())
+        except Exception:
+            pass
+        raise

@@ -16,6 +16,7 @@ except Exception:
 
 import discord_presence
 import encounter_log
+import scoutlog
 import sync
 import pick_advisor
 import live_match
@@ -29,6 +30,12 @@ from vconstants import APP_VERSION, STATES, rank_from_tier
 
 app = Flask(__name__)
 CORS(app)
+
+# Flask's logger also writes to .scout/backend.log (rotated + redacted) via
+# scoutlog; run.py separately captures this process's raw console into
+# .scout/backend-console.log, so hidden-mode failures are never lost.
+for _h in scoutlog.get_logger("backend").handlers:
+    app.logger.addHandler(_h)
 
 client = RiotClient()
 instalock_worker = InstalockWorker()
@@ -136,9 +143,14 @@ def build_player_payload(puuid: str) -> dict:
 
 @app.get("/api/health")
 def health():
+    import ws_server as _ws
     return jsonify({
         "ok": True,
         "service": "valorant-scout",
+        "appVersion": APP_VERSION,
+        "protocol": _ws.PROTOCOL_VERSION,
+        "wsReady": _ws.is_ready(),
+        "wsPort": _ws.listening_port(),
         "dataSourcePreference": client.source_pref,
         "officialKey": bool(client.api_key),
         "liveInstalockEnabled": client.allow_live_instalock,
@@ -566,10 +578,15 @@ def _start_ws_bridge() -> None:
         ws_server.start(board_provider=ws_state_provider, command_router=router,
                         frontend_url=frontend_url, ws_port=ws_port,
                         remote_controller=remote_controller,
-                        request_handler=handle_data_request)
+                        request_handler=handle_data_request,
+                        backend_port=int(os.getenv("BACKEND_PORT",
+                                                   os.getenv("PORT", "5000"))))
     except Exception as e:
-        app.logger.exception("WebSocket bridge failed to start")
-        print(f"[app] WebSocket bridge unavailable: {e}", flush=True)
+        # The bridge is how every dashboard reaches us — a dead bridge with a
+        # live backend is a silently broken app, so fail loudly instead.
+        app.logger.exception("VS-WS-001 WebSocket bridge failed to start")
+        print(f"[app] VS-WS-001 WebSocket bridge failed: {e}", flush=True)
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     port = int(os.getenv("BACKEND_PORT", os.getenv("PORT", "5000")))
@@ -582,4 +599,9 @@ if __name__ == "__main__":
     print(f"[app] Valorant Scout API on http://127.0.0.1:{port}  "
           f"(source={client.source_pref}, key={'set' if client.api_key else 'unset'})",
           flush=True)
-    app.run(host="127.0.0.1", port=port, debug=debug)
+    try:
+        app.run(host="127.0.0.1", port=port, debug=debug)
+    except OSError as e:
+        app.logger.error("VS-BACKEND-001 could not bind 127.0.0.1:%s: %s", port, e)
+        print(f"[app] VS-BACKEND-001 could not bind 127.0.0.1:{port}: {e}", flush=True)
+        raise SystemExit(1)

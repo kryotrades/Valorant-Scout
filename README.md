@@ -84,13 +84,26 @@ Cinematic dark UI, Framer-Motion animation, big readable type, agent splash art,
 
 ## 🚀 Quick start (Windows — no coding needed)
 
-1. **Download** this repo (green **Code → Download ZIP**) and unzip it anywhere.
-2. Double-click **`install.bat`** — one-time setup. It installs the right Python if you don't have
-   it, sets everything up, asks you to **pick your region**, and drops a **Valorant Scout** shortcut
-   on your Desktop (drag it to your taskbar to pin it).
-3. Double-click **`start.bat`** (or the Desktop shortcut) any time to launch. It **auto-updates** to
-   the newest release, then opens the **live dashboard** in your browser.
-   - `UPDATE.bat` updates manually whenever you want.
+**Supported:** Windows 10/11 **x64**, standard user account. The installer sets up its own
+CPython **3.12.10 x64** runtime (verified download from python.org) — other Pythons on your PC
+are never touched. ARM64 and 32-bit Windows are not supported.
+
+1. **Download the latest release ZIP** from the
+   [Releases page](https://github.com/kryotrades/valorant-scout/releases/latest)
+   (`valorant-scout-v<version>-windows-source.zip`) and **extract it** anywhere
+   (right-click → Extract All — don't run it from inside the ZIP).
+2. Double-click **`install.bat`** — one-time setup **and** repair tool. It verifies (or installs)
+   the exact Python runtime, installs pinned packages, asks you to **pick your region**, and drops
+   a **Valorant Scout** shortcut on your Desktop. Safe to re-run any time — it only fixes what's
+   broken and never touches your settings or data.
+3. Double-click **`start.bat`** (or the Desktop shortcut) any time to launch. Startup **never
+   installs or updates anything** — it validates fast (works offline) and tells you if a newer
+   release exists.
+   - `UPDATE.bat` applies updates: staged, checksum-verified, and rolled back automatically if
+     anything fails. Your settings, region and match data are always preserved.
+   - Something not working? Just run `install.bat` again — it repairs a broken setup in place
+     without touching your settings or data.
+   - Logs live in the `.scout` folder (`launcher.log`, `backend.log`, `install.log`, …).
 
 The dashboard is served from the web and connects **securely back to the app running on your PC** —
 your match data never leaves your machine. The first time, your browser may ask to **allow access to
@@ -111,7 +124,10 @@ python run.py --cli      # terminal scoreboard only
 ```
 By default the app opens the hosted dashboard; point it elsewhere with `FRONTEND_URL` in
 `backend/.env`. The full source (Flask backend **+** Next.js frontend) lives in the development repo
-if you want to run or modify the website locally.
+if you want to run or modify the website locally. For that explicit developer mode, run
+`install.bat -Frontend` once, then use `python run.py --local-frontend` (or set
+`SCOUT_LOCAL_FRONTEND=true`). Merely having a `frontend/` folder never makes normal startup require
+Node.js, so a copied/private checkout still works on a clean PC through the hosted dashboard.
 
 ---
 
@@ -199,12 +215,18 @@ Huge thanks to all of them. ❤️
 
 ## 🔄 Updating
 
-`start.bat` checks for a newer GitHub release on every launch and updates automatically
-(`UPDATE.bat` does it on demand). Updates **preserve** your settings, data and installed packages,
-and only re-install dependencies that actually changed.
+`start.bat` performs a bounded update **check** on launch and tells you when a new release exists —
+it never modifies your installation. `UPDATE.bat` applies updates as a **verified transaction**:
+the release is downloaded to a staging folder, its SHA-256 checksums and file manifest are
+verified, the current version is backed up, the new one is activated and boot-checked, and on any
+failure the previous version is restored automatically. Your settings (`backend/.env`), match data
+(`backend/data`) and logs (`.scout`) are never part of the transaction.
 
-**Cutting a release (maintainers):** bump the root `VERSION` file, commit, then publish a GitHub
-Release whose tag matches (e.g. `v1.1.0`). Clients on an older `VERSION` pick it up on next launch.
+**Cutting a release (maintainers):** bump `VERSION` **and** `runtime.json` (checked by
+`scripts/verify-version.ps1`), commit, run `scripts/build-release.ps1 -Version <v> -Output dist`,
+verify with `scripts/verify-release.ps1`, then publish a GitHub Release whose tag matches with all
+three assets: the ZIP, `release-manifest.json` and `SHA256SUMS.txt`. The updater refuses releases
+that are missing any of them.
 
 ## 📜 License
 

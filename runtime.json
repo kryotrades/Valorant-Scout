@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "version": "1.1.2",
+    "channel": "stable"
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.12.10",
+    "arch": "x64",
+    "bits": 64,
+    "installerUrl": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe",
+    "installerSha256": "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb",
+    "installerSubject": "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US"
+  },
+  "pip": {
+    "version": "26.1.2"
+  },
+  "requirements": {
+    "path": "backend/requirements.txt",
+    "hashAlgorithm": "sha256"
+  },
+  "protocol": {
+    "version": 1,
+    "supported": [1]
+  }
+}

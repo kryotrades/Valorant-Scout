@@ -1,5 +1,8 @@
 @echo off
 title Valorant Scout
+echo.
+echo   Starting Valorant Scout...
+echo   This window closes on its own once the scoreboard opens.
 if not exist "%~dp0.scout\installed.json" goto :notinstalled
 if not exist "%~dp0.venv\Scripts\python.exe" goto :notinstalled
 rem Launch fully hidden: the CLI scoreboard window is the app's face - closing
