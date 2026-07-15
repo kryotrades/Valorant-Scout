@@ -5,11 +5,9 @@
 )
 
 # Builds the public slim release artifact from an explicit ALLOWLIST of
-# tracked files. Produces exactly the three assets the updater consumes:
+# tracked files. Produces a single asset the updater consumes:
 #   valorant-scout-v<version>-windows-source.zip   (single root folder)
-#   release-manifest.json                          (version, commit, file hashes)
-#   SHA256SUMS.txt
-# Then verifies its own output by extracting elsewhere and re-hashing.
+# Then verifies its own output by extracting elsewhere and checking it.
 
 . (Join-Path $PSScriptRoot "common.ps1")
 
@@ -120,31 +118,11 @@ try {
     }
     Ok "Encodings OK."
 
-    # ---- manifest + zip + sums ----------------------------------------------
-    Step "Writing release-manifest.json ..."
-    $files = [ordered]@{}
-    foreach ($file in (Get-ChildItem -Path $stage -Recurse -File | Sort-Object FullName)) {
-        $rel = $file.FullName.Substring($stage.Length + 1) -replace '\\', '/'
-        $files[$rel] = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash.ToLower()
-    }
-    $manifest = [ordered]@{
-        schemaVersion = 1
-        version       = $Version
-        commit        = $commit
-        dirty         = $dirty
-        builtAt       = [DateTime]::UtcNow.ToString("o")
-        rootFolder    = $rootFolder
-        python        = @{ version = $mf.python.version; arch = $mf.python.arch }
-        protocol      = $mf.protocol.version
-        files         = $files
-    }
+    # ---- zip ----------------------------------------------------------------
+    # The release is a single source zip — no separate manifest or checksum
+    # assets. GitHub serves it over HTTPS and the updater boot-checks + rolls
+    # back, so a self-referential checksum added no real protection.
     New-Item -ItemType Directory -Force -Path $Output | Out-Null
-    $manifestPath = Join-Path $Output "release-manifest.json"
-    Write-FileNoBom $manifestPath (($manifest | ConvertTo-Json -Depth 5))
-
-    # the zip carries a copy of the manifest so installed trees know their file list
-    Copy-Item -Force $manifestPath (Join-Path $stage "release-manifest.json")
-
     $zipName = "valorant-scout-v$Version-windows-source.zip"
     $zipPath = Join-Path $Output $zipName
     if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
@@ -152,35 +130,22 @@ try {
     [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zipPath,
         [System.IO.Compression.CompressionLevel]::Optimal, $true)
 
-    $sums = @()
-    foreach ($asset in @($zipPath, $manifestPath)) {
-        $sums += ((Get-FileHash -Algorithm SHA256 -Path $asset).Hash.ToLower() + "  " + (Split-Path -Leaf $asset))
-    }
-    Write-FileNoBom (Join-Path $Output "SHA256SUMS.txt") (($sums -join "`n") + "`n")
-
-    # ---- self-verify: extract elsewhere and compare -------------------------
-    Step "Verifying the built artifact (extract + compare to manifest) ..."
+    # ---- self-verify: extract elsewhere and sanity-check --------------------
+    Step "Verifying the built artifact (extract + check) ..."
     $verifyDir = Join-Path $work "verify"
-    $probe = Join-Path $PSScriptRoot "update_verify.py"
-    $pyExe = $VenvPy
-    if (-not (Test-Path $pyExe)) {
-        $cand = Find-ExactPython
-        if (-not $cand) { Fail-Build "no Python available to run the artifact verification." }
-        $pyExe = $cand.Exe
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $verifyDir)
+    $vroot = Join-Path $verifyDir $rootFolder
+    if (-not (Test-Path $vroot)) { Fail-Build "zip does not contain the expected root folder '$rootFolder'." }
+    if ((Get-Content (Join-Path $vroot "VERSION") -Raw).Trim() -ne $Version) { Fail-Build "zip VERSION != $Version." }
+    foreach ($req in @("run.py", "cli.py", "start.bat", "install.bat", "UPDATE.bat",
+                       "runtime.json", "backend\app.py", "backend\requirements.txt",
+                       "scripts\common.ps1", "scripts\start.ps1", "scripts\update.ps1")) {
+        if (-not (Test-Path (Join-Path $vroot $req))) { Fail-Build "zip missing required file: $req" }
     }
-    $verifyArgs = @($probe, "--zip", $zipPath, "--sums", (Join-Path $Output "SHA256SUMS.txt"),
-        "--manifest", $manifestPath, "--dest", $verifyDir, "--expect-version", $Version,
-        "--expect-python", [string]$mf.python.version, "--expect-arch", [string]$mf.python.arch,
-        "--supported-protocol", [string]$mf.protocol.version)
-    if ($AllowDirty) { $verifyArgs += "--allow-dirty" }
-    & $pyExe @verifyArgs
-    if ($LASTEXITCODE -ne 0) { Fail-Build "artifact failed its own verification." }
 
     Write-Host ""
     Ok "Release artifact built and verified:"
     Note "  $zipPath"
-    Note "  $manifestPath"
-    Note "  $(Join-Path $Output 'SHA256SUMS.txt')"
     Note "  commit $commit$(if ($dirty) { ' (DIRTY TREE)' })"
     exit 0
 } finally {

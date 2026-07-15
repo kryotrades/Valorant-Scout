@@ -220,17 +220,18 @@ Huge thanks to all of them. ❤️
 `start.bat` **auto-updates on every launch**: it checks for a newer release and, if one exists,
 applies it before starting the app (offline or GitHub unreachable → it just launches your current
 version and retries next time). `UPDATE.bat` runs the same thing on demand. Either way the update
-is a **verified transaction**: the release is downloaded to a staging folder, its SHA-256 checksums
-and file manifest are verified, the current version is backed up, the new one is activated and
-boot-checked, and on any failure the previous version is restored automatically. Your settings
-(`backend/.env`), match data (`backend/data`) and logs (`.scout`) are never part of the transaction.
-(On a developer checkout — a `.git` folder present — auto-update is skipped; use `git pull`.)
+is a **safe transaction**: the release zip is downloaded to a staging folder and extracted, the
+current version is backed up, the new one is activated and **boot-checked** (backend + WebSocket
+must come up healthy), and on any failure the previous version — code and dependencies — is
+restored automatically. Your settings (`backend/.env`), match data (`backend/data`) and logs
+(`.scout`) are never part of the transaction. (On a developer checkout — a `.git` folder present —
+auto-update is skipped; use `git pull`.)
 
 **Cutting a release (maintainers):** bump `VERSION` **and** `runtime.json` (checked by
 `scripts/verify-version.ps1`), commit, run `scripts/build-release.ps1 -Version <v> -Output dist`,
-verify with `scripts/verify-release.ps1`, then publish a GitHub Release whose tag matches with all
-three assets: the ZIP, `release-manifest.json` and `SHA256SUMS.txt`. The updater refuses releases
-that are missing any of them.
+verify with `scripts/verify-release.ps1 -Zip <zip>`, then publish a GitHub Release whose tag matches
+with the single `valorant-scout-v<version>-windows-source.zip` asset. The updater downloads that zip
+over HTTPS and refuses a release that doesn't contain it.
 
 ## 📜 License
 

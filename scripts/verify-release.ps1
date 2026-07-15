@@ -1,48 +1,35 @@
 ﻿param(
-    [Parameter(Mandatory = $true)][string]$Zip,
-    [Parameter(Mandatory = $true)][string]$Checksum,   # SHA256SUMS.txt
-    [string]$Manifest = "",                            # defaults to sibling release-manifest.json
-    [switch]$AllowDirty                                # local test artifacts only
+    [Parameter(Mandatory = $true)][string]$Zip
 )
 
-# Independent check of a built artifact: checksums, manifest agreement, safe
-# archive structure, forbidden content, and launcher encodings.
+# Independent check of a built release zip: safe archive structure, forbidden
+# content, required files and launcher encodings. The release is a single zip
+# (no manifest/checksum assets) served over HTTPS, so there is nothing to
+# cross-check against - the updater boot-checks and rolls back at apply time.
 
 . (Join-Path $PSScriptRoot "common.ps1")
 
-if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent $Zip) "release-manifest.json" }
-foreach ($f in @($Zip, $Checksum, $Manifest)) {
-    if (-not (Test-Path $f)) { Fail "missing: $f"; exit 1 }
-}
-
-$mfJson = Get-Content $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-$version = $mfJson.version
+if (-not (Test-Path $Zip)) { Fail "missing: $Zip"; exit 1 }
 
 $work = Join-Path $env:TEMP ("vs-verify-" + [Guid]::NewGuid().ToString("N"))
 try {
-    Step "Structural + checksum verification (update_verify.py) ..."
-    $pyExe = $VenvPy
-    if (-not (Test-Path $pyExe)) {
-        $cand = Find-ExactPython
-        if (-not $cand) { Fail "no Python available."; exit 1 }
-        $pyExe = $cand.Exe
-    }
-    $runtime = Get-RuntimeManifest
-    $verifyArgs = @((Join-Path $PSScriptRoot "update_verify.py"), "--zip", $Zip,
-        "--sums", $Checksum, "--manifest", $Manifest, "--dest", $work,
-        "--expect-version", $version, "--expect-python", [string]$runtime.python.version,
-        "--expect-arch", [string]$runtime.python.arch,
-        "--supported-protocol", [string]$runtime.protocol.version)
-    if ($AllowDirty) { $verifyArgs += "--allow-dirty" }
-    & $pyExe @verifyArgs
-    if ($LASTEXITCODE -ne 0) { Fail "artifact verification failed."; exit 1 }
-    Ok "checksums + archive structure + per-file hashes OK."
+    Step "Extracting the zip ..."
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $work)
 
-    $tree = Join-Path $work "valorant-scout-v$version"
+    # Exactly one root folder: valorant-scout-v<version>
+    $roots = @(Get-ChildItem -Path $work -Directory)
+    if ($roots.Count -ne 1 -or $roots[0].Name -notmatch '^valorant-scout-v(.+)$') {
+        Fail "zip must contain a single 'valorant-scout-v<version>' root folder."; exit 1
+    }
+    $tree = $roots[0].FullName
+    $version = $Matches[1]
+    if ((Get-Content (Join-Path $tree "VERSION") -Raw).Trim() -ne $version) {
+        Fail "VERSION inside the zip != the root-folder version ($version)."; exit 1
+    }
 
     Step "Forbidden-content scan ..."
-    # Any-depth patterns, in lockstep with $ForbiddenPatterns in build-release.ps1
-    # (a root-anchored '^\.venv/' misses a nested 'backend/.venv/').
+    # Any-depth patterns, in lockstep with $ForbiddenPatterns in build-release.ps1.
     $forbidden = @('(^|/)\.env$', '\.env\.local', '(^|/)frontend/', '(^|/)node_modules/',
                    '(^|/)__pycache__/', '\.pyc$', '(^|/)\.venv/', '(^|/)\.scout/',
                    '(^|/)backend/data/', '(^|/)\.next/', '(^|/)\.git/', '(^|/)ops/',
@@ -65,7 +52,7 @@ try {
                        "runtime.json", "run.py", "cli.py", "backend/requirements.txt",
                        "backend/app.py", "scripts/common.ps1", "scripts/install.ps1",
                        "scripts/start.ps1", "scripts/update.ps1", "scripts/diagnose.ps1",
-                       "scripts/import_smoke.py", "scripts/update_verify.py", "release-manifest.json")) {
+                       "scripts/import_smoke.py")) {
         if (-not (Test-Path (Join-Path $tree ($req -replace '/', '\')))) { Fail "required file missing: $req"; exit 1 }
     }
     foreach ($file in (Get-ChildItem -Path $tree -Recurse -File -Include *.ps1, *.bat)) {
@@ -76,11 +63,10 @@ try {
         }
         if (($text -replace "`r`n", "") -match "`n") { Fail "$($file.Name) has LF-only line endings."; exit 1 }
     }
-    if ((Get-Content (Join-Path $tree "VERSION") -Raw).Trim() -ne $version) { Fail "VERSION inside the zip != manifest version."; exit 1 }
     Ok "required files present, encodings OK, VERSION agrees."
 
     Write-Host ""
-    Ok "Artifact verified: $Zip (v$version, commit $($mfJson.commit))"
+    Ok "Artifact verified: $Zip (v$version)"
     exit 0
 } finally {
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue

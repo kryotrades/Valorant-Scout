@@ -72,6 +72,12 @@ function Remove-LegacyCaches {
     foreach ($target in @($targets | Sort-Object FullName -Unique)) {
         Remove-Item -LiteralPath $target.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # Releases no longer ship a manifest or the checksum verifier; drop the
+    # copies an older install left behind so the tree matches what we ship.
+    foreach ($stale in @("release-manifest.json", "scripts\update_verify.py")) {
+        $p = Join-Path $Root $stale
+        if (Test-Path $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Restore-FromBackup($state) {
@@ -150,18 +156,14 @@ try {
         throw "This is a developer checkout (.git present). The updater refuses to overwrite it — use git pull, or re-run with -DevOverride if you really mean it."
     }
 
-    # ---- Locate the release assets -------------------------------------
-    $zipName = ""; $zip = ""; $sums = ""; $manifest = ""; $newVersion = ""
+    # ---- Locate the release zip ----------------------------------------
+    $zipName = ""; $zip = ""; $newVersion = ""
     if ($LocalAssets) {
         if (-not $ExpectVersion) { throw "-LocalAssets requires -ExpectVersion." }
         $newVersion = $ExpectVersion
         $zipName  = "valorant-scout-v$newVersion-windows-source.zip"
         $zip      = Join-Path $LocalAssets $zipName
-        $sums     = Join-Path $LocalAssets "SHA256SUMS.txt"
-        $manifest = Join-Path $LocalAssets "release-manifest.json"
-        foreach ($f in @($zip, $sums, $manifest)) {
-            if (-not (Test-Path $f)) { throw "missing local asset: $f" }
-        }
+        if (-not (Test-Path $zip)) { throw "missing local asset: $zip" }
         Note "Using local assets from $LocalAssets (v$newVersion)."
     } else {
         Step "Checking for updates ..."
@@ -173,36 +175,28 @@ try {
             exit 0
         }
         Step "Updating v$(Get-LocalVersion) -> v$newVersion ..."
-        # Exact asset names only. Never the auto-generated source zipball, never
-        # "the first zip we find".
+        # Exact asset name only — never the auto-generated GitHub source zipball.
         $zipName = "valorant-scout-v$newVersion-windows-source.zip"
-        $need = @{}
-        foreach ($a in $rel.assets) { $need[$a.name] = $a.browser_download_url }
-        foreach ($n in @($zipName, "SHA256SUMS.txt", "release-manifest.json")) {
-            if (-not $need.ContainsKey($n)) {
-                throw "release v$newVersion is missing required asset '$n' — refusing to update from an incomplete release."
-            }
+        $zipUrl = $null
+        foreach ($a in $rel.assets) { if ($a.name -eq $zipName) { $zipUrl = $a.browser_download_url } }
+        if (-not $zipUrl) {
+            throw "release v$newVersion has no '$zipName' asset — refusing to update from an incomplete release."
         }
         $staging = Join-Path $env:TEMP ("vs-update-" + [Guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $staging | Out-Null
-        foreach ($n in @($zipName, "SHA256SUMS.txt", "release-manifest.json")) {
-            $out = Join-Path $staging $n
-            $okDl = $false
-            for ($i = 1; $i -le 3; $i++) {
-                try {
-                    Invoke-WebRequest -Uri $need[$n] -OutFile $out `
-                        -Headers @{ "User-Agent" = "valorant-scout" } -TimeoutSec 300
-                    $okDl = $true; break
-                } catch {
-                    Warn2 "download hiccup for $n ($($_.Exception.Message)) - retrying ($i/3) ..."
-                    Start-Sleep -Seconds 3
-                }
+        $zip = Join-Path $staging $zipName
+        $okDl = $false
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zip `
+                    -Headers @{ "User-Agent" = "valorant-scout" } -TimeoutSec 300
+                $okDl = $true; break
+            } catch {
+                Warn2 "download hiccup ($($_.Exception.Message)) - retrying ($i/3) ..."
+                Start-Sleep -Seconds 3
             }
-            if (-not $okDl) { throw "couldn't download '$n' after 3 attempts." }
         }
-        $zip      = Join-Path $staging $zipName
-        $sums     = Join-Path $staging "SHA256SUMS.txt"
-        $manifest = Join-Path $staging "release-manifest.json"
+        if (-not $okDl) { throw "couldn't download '$zipName' after 3 attempts." }
     }
 
     if (-not $staging) {
@@ -217,22 +211,20 @@ try {
         throw "not enough free disk space to update safely (need ~$([Math]::Ceiling($needBytes / 1MB)) MB)."
     }
 
-    # ---- Verify + extract into staging (all checks live in update_verify.py)
-    Step "Verifying the download (checksums, manifest contract, archive safety) ..."
+    # ---- Extract into staging -------------------------------------------
+    # Expand-Archive uses .NET ZipFile, which rejects path-traversal entries and
+    # fails on a corrupt/truncated zip. The release ships only the source zip,
+    # served over HTTPS — no separate checksum/manifest step.
+    Step "Extracting the download ..."
     $extract = Join-Path $staging "tree"
-    $verifyArgs = @((Join-Path $PSScriptRoot "update_verify.py"),
-        "--zip", $zip, "--sums", $sums, "--manifest", $manifest,
-        "--dest", $extract, "--expect-version", $newVersion,
-        "--expect-python", [string]$currentRuntime.python.version,
-        "--expect-arch", [string]$currentRuntime.python.arch)
-    foreach ($supported in @($currentRuntime.protocol.supported)) {
-        $verifyArgs += @("--supported-protocol", [string]$supported)
-    }
-    if ($AllowDirtyAssets) { $verifyArgs += "--allow-dirty" }
-    & $VenvPy @verifyArgs
-    if ($LASTEXITCODE -ne 0) { throw "release verification failed — refusing to apply. Nothing was changed." }
+    Expand-Archive -Path $zip -DestinationPath $extract -Force
     $newRoot = Join-Path $extract "valorant-scout-v$newVersion"
-    $mf = Get-Content $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not (Test-Path (Join-Path $newRoot "backend")) -or -not (Test-Path (Join-Path $newRoot "VERSION"))) {
+        throw "the downloaded release does not contain the expected app files."
+    }
+    if ((Get-Content (Join-Path $newRoot "VERSION") -Raw).Trim() -ne $newVersion) {
+        throw "the downloaded release's VERSION does not match v$newVersion."
+    }
     $newRuntime = Get-Content (Join-Path $newRoot "runtime.json") -Raw -Encoding UTF8 | ConvertFrom-Json
     $newReqHash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $newRoot "backend\requirements.txt")).Hash.ToLowerInvariant()
     $needsVenv = ($newReqHash -ne $oldReqHash -or [string]$newRuntime.pip.version -ne $oldPipVersion)
@@ -246,34 +238,22 @@ try {
             throw "not enough free disk space for a transactional dependency update (need ~$([Math]::Ceiling($transactionBytes / 1MB)) MB)."
         }
     }
-    Ok "Release verified ($($mf.files.PSObject.Properties.Name.Count) files, commit $($mf.commit.Substring(0,10)))."
+    # The app's files = every file in the extracted release tree (relative
+    # paths). We replace exactly those; user data is never in the zip.
+    $newFiles = @(Get-ChildItem -Path $newRoot -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($newRoot.Length).TrimStart('\')
+    })
+    if ($newFiles.Count -lt 20) { throw "the downloaded release looks incomplete ($($newFiles.Count) files)." }
+    Ok "Download extracted ($($newFiles.Count) files, v$newVersion)."
 
     # ---- Plan the transaction ------------------------------------------
-    $newFiles = @($mf.files.PSObject.Properties.Name | ForEach-Object { $_ -replace '/', '\' })
     foreach ($rel in $newFiles) {
         $null = Resolve-RepoPath $rel
-        if (Test-Preserved $rel) { throw "manifest tries to overwrite protected user data ('$rel') — refusing." }
+        if (Test-Preserved $rel) { throw "the release tries to overwrite protected user data ('$rel') — refusing." }
     }
-
-    # Files removed by the new version = old manifest's files absent from the
-    # new one. (Releases before this one shipped no manifest — then we can't
-    # know, and leave old files in place.)
-    $removed = @()
-    $oldManifestPath = Join-Path $Root "release-manifest.json"
-    if (Test-Path $oldManifestPath) {
-        try {
-            $oldMf = Get-Content $oldManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $newSet = @{}
-            foreach ($n in $newFiles) { $newSet[$n.ToLowerInvariant()] = $true }
-            foreach ($n in $oldMf.files.PSObject.Properties.Name) {
-                $reln = $n -replace '/', '\'
-                $null = Resolve-RepoPath $reln
-                if (-not $newSet.ContainsKey($reln.ToLowerInvariant()) -and -not (Test-Preserved $reln)) {
-                    $removed += $reln
-                }
-            }
-        } catch { $removed = @(); Warn2 "old release-manifest.json unreadable or unsafe - skipping stale-file cleanup." }
-    }
+    # No manifest: the release replaces its own files in place. A file dropped
+    # between versions is left as harmless dead weight (the app loads code by
+    # known names); Remove-LegacyCaches still clears stale bytecode.
 
     $backupDir = Join-Path $ScoutDir ("update-backup-" + (Get-LocalVersion))
     if (Test-Path $backupDir) { Remove-Item -Recurse -Force $backupDir }
@@ -281,7 +261,7 @@ try {
 
     $added = @()
     Step "Backing up the current version ..."
-    foreach ($rel in ($newFiles + $removed + @("release-manifest.json"))) {
+    foreach ($rel in $newFiles) {
         $src = Resolve-RepoPath $rel
         if (Test-Path $src) {
             $dst = Join-Path $backupDir $rel
@@ -312,13 +292,6 @@ try {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
             Copy-Item -Force $src $dst
         }
-        foreach ($rel in $removed) {
-            $p = Resolve-RepoPath $rel
-            if (Test-Path $p) { Remove-Item -Force $p }
-        }
-        # Keep the manifest in the live tree so the NEXT update knows this
-        # version's exact file list (stale-file cleanup).
-        Copy-Item -Force $manifest (Join-Path $Root "release-manifest.json")
 
         $state.phase = "validate"
         Write-UpdateState $state
