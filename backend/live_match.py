@@ -54,11 +54,17 @@ _LEVEL_CACHE: dict[str, int] = {}
 _KD_FILL_LOCK = threading.Lock()
 _KD_FILLING: set[str] = set()
 
-_KD_CACHE: dict[str, tuple[tuple, float, int]] = {}
-_KD_TTL = 15 * 60.0
+# per-player caches keyed on "newest match id" instead of a TTL: stats can only
+# change when a new match lands in history, and the history check is on the
+# cheap rate bucket while the data it protects (/mmr/) is on the scarce one
+_KD_CACHE: dict[str, tuple[tuple, tuple, int]] = {}   # puuid -> (result, mids, count)
 _KD_CACHE_MAX = 300
 
-_MIDS_CACHE: dict[str, tuple[list[str], float]] = {}
+_MIDS_CACHE: dict[str, tuple[list[str], bool, float]] = {}  # puuid -> (mids, is_comp, at)
+_MIDS_TTL = 60.0
+
+_RANK_CACHE: dict[str, tuple[dict, str]] = {}  # puuid -> (rank_info out, newest comp mid)
+_RR_CACHE: dict[str, tuple] = {}               # puuid -> (rr_earned, newest comp mid)
 
 _MATCH_DETAIL_CACHE: dict[str, dict] = {}
 _MATCH_DETAIL_MAX = 200
@@ -426,10 +432,42 @@ class LiveMatch:
                 return s["ID"]
         return None
 
+    def _fresh_mids(self, puuid):
+        """Newest match ids for a player — first non-empty of competitive,
+        unrated, swiftplay, then anything. Cheap history calls only, cached
+        for _MIDS_TTL; returns (mids, is_comp, throttled)."""
+        hit = _MIDS_CACHE.get(puuid)
+        if hit and time.time() - hit[2] < _MIDS_TTL:
+            return hit[0], hit[1], False
+        mids: list[str] = []
+        is_comp = False
+        throttled = False
+        for queue in ("competitive", "unrated", "swiftplay", ""):
+            q = f"&queue={queue}" if queue else ""
+            hist = self.auth.pd_get(
+                f"/match-history/v1/history/{puuid}?startIndex=0&endIndex=10{q}",
+                retries=3)
+            throttled = throttled or _is_throttled(hist)
+            entries = (hist or {}).get("History", []) if isinstance(hist, dict) else []
+            mids = [e["MatchID"] for e in entries if e.get("MatchID")]
+            if mids or throttled:
+                is_comp = bool(mids) and queue == "competitive"
+                break
+        if not throttled:
+            _cache_put(_MIDS_CACHE, _KD_CACHE_MAX, puuid, (mids, is_comp, time.time()))
+        return mids, is_comp, throttled
+
     def rank_info(self, puuid, season, prev_season=None):
         out = {"tier": 0, "rr": 0, "lb": 0, "peak": 0, "wr": 0, "games": 0,
                "prev": 0, "peak_season": season, "ok": False}
         try:
+            # rank/RR/peak/wr only move via comp matches — reuse the cached
+            # result until a new comp match shows up in history
+            mids, is_comp, _ = self._fresh_mids(puuid)
+            rank_key = mids[0] if (mids and is_comp) else "nocomp"
+            hit = _RANK_CACHE.get(puuid)
+            if hit and hit[1] == rank_key:
+                return hit[0]
             if riot_client.held_secs("/mmr/") > 0:
                 return out
             r = self.auth.pd_get(f"/mmr/v1/players/{puuid}")
@@ -459,6 +497,7 @@ class LiveMatch:
             games = cur.get("NumberOfGames", 0) or 0
             out["games"] = games
             out["wr"] = round(wins / games * 100) if games else 0
+            _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (out, rank_key))
         except Exception:
             pass
         return out
@@ -512,39 +551,19 @@ class LiveMatch:
 
     def kd_hs(self, puuid, count=3):
         pass
-        cached = _KD_CACHE.get(puuid)
-        if cached and time.time() - cached[1] < _KD_TTL and cached[2] >= count:
-            return cached[0]
         try:
             rr_earned = None
-            throttled = False
 
             # comp match ids come from match-history (generous rate bucket),
             # NOT competitiveupdates (/mmr/ bucket is ~30 req/60s account-wide)
-            mids_all: list[str] | None = None
-            hit = _MIDS_CACHE.get(puuid)
-            if hit and time.time() - hit[1] < _KD_TTL:
-                mids_all = hit[0]
-            if mids_all is None:
-                hist = self.auth.pd_get(
-                    f"/match-history/v1/history/{puuid}?startIndex=0&endIndex=10&queue=competitive",
-                    retries=3)
-                throttled = _is_throttled(hist)
-                entries = (hist or {}).get("History", []) if isinstance(hist, dict) else []
-                mids_all = [e["MatchID"] for e in entries if e.get("MatchID")]
-                if not mids_all and not throttled:
-
-                    hist = self.auth.pd_get(
-                        f"/match-history/v1/history/{puuid}?startIndex=0&endIndex=10",
-                        retries=3)
-                    throttled = _is_throttled(hist)
-                    entries = (hist or {}).get("History", []) if isinstance(hist, dict) else []
-                    mids_all = [e["MatchID"] for e in entries if e.get("MatchID")]
-                if not throttled:
-                    _cache_put(_MIDS_CACHE, _KD_CACHE_MAX, puuid, (mids_all, time.time()))
+            mids_all, _, throttled = self._fresh_mids(puuid)
             mids = mids_all[:count]
             if not mids:
                 return None, None, rr_earned, ("throttled" if throttled else "empty"), None
+            cached = _KD_CACHE.get(puuid)
+            if (cached and cached[2] >= count
+                    and list(cached[1])[:count] == mids):
+                return cached[0]
 
             def fetch_detail(mid):
                 hit = _MATCH_DETAIL_CACHE.get(mid)
@@ -612,7 +631,7 @@ class LiveMatch:
             }
             result = (kd, hs, rr_earned, "ok", intel)
             if not throttled and used == len(mids):
-                _cache_put(_KD_CACHE, _KD_CACHE_MAX, puuid, (result, time.time(), count))
+                _cache_put(_KD_CACHE, _KD_CACHE_MAX, puuid, (result, tuple(mids), count))
             return result
         except Exception:
             return None, None, None, "error", None
@@ -657,12 +676,21 @@ class LiveMatch:
                     if entry is None or entry.get("kd_full") or entry.get("kd") is None:
                         return
                     entry["kd_full"] = True
-                    cu = self.auth.pd_get(
-                        f"/mmr/v1/players/{puuid}/competitiveupdates"
-                        f"?startIndex=0&endIndex=1&queue=competitive", retries=1)
-                    m = cu.get("Matches", []) if isinstance(cu, dict) else []
-                    if m:
-                        entry["rr_earned"] = m[0].get("RankedRatingEarned")
+                    mids, is_comp, _ = self._fresh_mids(puuid)
+                    rr_key = mids[0] if (mids and is_comp) else "nocomp"
+                    hit = _RR_CACHE.get(puuid)
+                    if hit and hit[1] == rr_key:
+                        entry["rr_earned"] = hit[0]
+                    else:
+                        cu = self.auth.pd_get(
+                            f"/mmr/v1/players/{puuid}/competitiveupdates"
+                            f"?startIndex=0&endIndex=1&queue=competitive", retries=1)
+                        m = cu.get("Matches", []) if isinstance(cu, dict) else []
+                        if m:
+                            entry["rr_earned"] = m[0].get("RankedRatingEarned")
+                        if isinstance(cu, dict) and not _is_throttled(cu):
+                            _cache_put(_RR_CACHE, _KD_CACHE_MAX, puuid,
+                                       (entry.get("rr_earned"), rr_key))
                     kd, hs, _, status, intel = self.kd_hs(puuid, count=5)
                     if kd is not None:
                         entry["kd"], entry["hs"] = kd, hs
@@ -751,9 +779,12 @@ class LiveMatch:
             if cached is None:
                 rk = self.rank_info(puuid, season, prev_season)
 
+                # kd_done=False even for include_stats=False callers (discord
+                # presence): a stats-less build racing the main loop must not
+                # permanently mark players done — the next stats tick queues them
                 cached = {"rk": rk, "prev": rk.get("prev", 0),
                           "kd": None, "hs": None, "rr_earned": None,
-                          "kd_done": not include_stats}
+                          "kd_done": False}
                 if not rk.get("ok"):
 
                     cached["rank_at"] = time.time()
