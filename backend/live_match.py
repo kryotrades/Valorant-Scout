@@ -462,12 +462,27 @@ class LiveMatch:
                "prev": 0, "peak_season": season, "ok": False}
         try:
             # rank/RR/peak/wr only move via comp matches — reuse the cached
-            # result until a new comp match shows up in history
-            mids, is_comp, _ = self._fresh_mids(puuid)
-            rank_key = mids[0] if (mids and is_comp) else "nocomp"
+            # result until a new comp match shows up in history. Only pay for
+            # the history check when there IS a cached rank to validate: cold
+            # first builds go straight to /mmr/ (key adopted on next tick,
+            # once the KD fill has warmed the mids cache).
             hit = _RANK_CACHE.get(puuid)
-            if hit and hit[1] == rank_key:
-                return hit[0]
+            if hit:
+                mids, is_comp, _ = self._fresh_mids(puuid)
+                rank_key = mids[0] if (mids and is_comp) else "nocomp"
+                if hit[1] is None:
+                    # ponytail: adopt-key window ≈ one 4s tick; a comp match
+                    # finishing inside it serves one stale rank tick, no worse
+                    _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (hit[0], rank_key))
+                    return hit[0]
+                if hit[1] == rank_key:
+                    return hit[0]
+            else:
+                mhit = _MIDS_CACHE.get(puuid)
+                if mhit and time.time() - mhit[2] < _MIDS_TTL:
+                    rank_key = mhit[0][0] if (mhit[0] and mhit[1]) else "nocomp"
+                else:
+                    rank_key = None
             if riot_client.held_secs("/mmr/") > 0:
                 return out
             r = self.auth.pd_get(f"/mmr/v1/players/{puuid}")
@@ -971,8 +986,10 @@ class LiveMatch:
             rk = self.rank_info(puuid, season, prev_season)
             kd = hs = intel = None
             if include_stats:
-
-                kd, hs, _, _, intel = self.kd_hs(puuid)
+                # full 5 games inline: lobbies are <=5 players and not
+                # latency-critical, and the warm cache then serves 5-game
+                # stats instantly when the match starts
+                kd, hs, _, _, intel = self.kd_hs(puuid, count=5)
 
             level = m.get("level", 0) or 0
             if level <= 0:
