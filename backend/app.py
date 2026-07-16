@@ -216,42 +216,51 @@ def _client_notice() -> dict:
 _LAST_GOOD = {"board": None, "at": 0.0}
 _HOLD_SECS = 12
 
+# Single-flight board building: the WS broadcast loop, per-connect sends, the
+# Ably publisher, /api/live and _current_weapons all funnel through build_live —
+# one build per tick serves every consumer instead of stacking Riot calls.
+_BUILD_LOCK = threading.Lock()
+_BUILD_FRESH = 3.5  # ponytail: just under WS_STATE_POLL (4s) so every broadcast tick still builds fresh
+
 def build_live(seed: int = 7, want_state: str | None = None) -> dict:
     pass
     notice = None
     if _live_enabled():
-        try:
-            lm = live_match.LiveMatch(LocalAuth())
-            board = lm.build_scoreboard(
-                include_stats=os.getenv("LIVE_INCLUDE_STATS", "true").lower() != "false"
-            )
-            board.setdefault("sourceDetail", "Local VALORANT client")
-
-            try:
-                session_tracker.observe(board, lm)
-                session_tracker.attach(board)
-            except Exception:
-                app.logger.exception("session tracking failed")
-
-            try:
-                encounter_log.record_board(board)
-                _attach_encounters(board)
-            except Exception:
-                app.logger.exception("encounter logging failed")
-            board["appVersion"] = APP_VERSION
-            sync.observe(board)
-            _LAST_GOOD["board"], _LAST_GOOD["at"] = board, time.time()
-            return board
-        except Exception as e:
-            app.logger.exception("live scoreboard failed")
-
-            if _LAST_GOOD["board"] and time.time() - _LAST_GOOD["at"] < _HOLD_SECS:
+        with _BUILD_LOCK:
+            if _LAST_GOOD["board"] and time.time() - _LAST_GOOD["at"] < _BUILD_FRESH:
                 return _LAST_GOOD["board"]
-            notice = _client_notice()
-            if client.source_pref == "local":
-                return {"state": "OFFLINE", "stateLabel": "Offline", "source": "local",
-                        "error": str(e), "players": [], "teams": {}, "parties": [],
-                        "notice": notice, "appVersion": APP_VERSION}
+            try:
+                lm = live_match.LiveMatch(LocalAuth())
+                board = lm.build_scoreboard(
+                    include_stats=os.getenv("LIVE_INCLUDE_STATS", "true").lower() != "false"
+                )
+                board.setdefault("sourceDetail", "Local VALORANT client")
+
+                try:
+                    session_tracker.observe(board, lm)
+                    session_tracker.attach(board)
+                except Exception:
+                    app.logger.exception("session tracking failed")
+
+                try:
+                    encounter_log.record_board(board)
+                    _attach_encounters(board)
+                except Exception:
+                    app.logger.exception("encounter logging failed")
+                board["appVersion"] = APP_VERSION
+                sync.observe(board)
+                _LAST_GOOD["board"], _LAST_GOOD["at"] = board, time.time()
+                return board
+            except Exception as e:
+                app.logger.exception("live scoreboard failed")
+
+                if _LAST_GOOD["board"] and time.time() - _LAST_GOOD["at"] < _HOLD_SECS:
+                    return _LAST_GOOD["board"]
+                notice = _client_notice()
+                if client.source_pref == "local":
+                    return {"state": "OFFLINE", "stateLabel": "Offline", "source": "local",
+                            "error": str(e), "players": [], "teams": {}, "parties": [],
+                            "notice": notice, "appVersion": APP_VERSION}
     elif client.source_pref != "demo" and not LocalAuth.available():
 
         notice = _client_notice()
@@ -575,18 +584,45 @@ def _start_ws_bridge() -> None:
     remote_controller.attach_router(router)
 
     try:
-        ws_server.start(board_provider=ws_state_provider, command_router=router,
-                        frontend_url=frontend_url, ws_port=ws_port,
-                        remote_controller=remote_controller,
-                        request_handler=handle_data_request,
-                        backend_port=int(os.getenv("BACKEND_PORT",
-                                                   os.getenv("PORT", "5000"))))
+        token = ws_server.start(board_provider=ws_state_provider, command_router=router,
+                                frontend_url=frontend_url, ws_port=ws_port,
+                                remote_controller=remote_controller,
+                                request_handler=handle_data_request,
+                                backend_port=int(os.getenv("BACKEND_PORT",
+                                                           os.getenv("PORT", "5000"))))
     except Exception as e:
         # The bridge is how every dashboard reaches us — a dead bridge with a
         # live backend is a silently broken app, so fail loudly instead.
         app.logger.exception("VS-WS-001 WebSocket bridge failed to start")
         print(f"[app] VS-WS-001 WebSocket bridge failed: {e}", flush=True)
         raise SystemExit(1)
+    _write_bridge_file(ws_port, token)
+
+def _write_bridge_file(ws_port: int, token: str) -> None:
+    """Advertise the live bridge to the --bridge CLI. Same trust model as
+    Riot's own lockfile: a user-readable file holding the per-launch secret.
+    Non-fatal on failure — a locked/synced .scout folder must not kill startup
+    (the CLI just keeps showing "waiting for backend")."""
+    import tempfile
+    import ws_server
+    try:
+        scout_dir = scoutlog.SCOUT_DIR
+        scout_dir.mkdir(exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(scout_dir), prefix=".bridge-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"wsPort": ws_port, "token": token,
+                           "protocol": ws_server.PROTOCOL_VERSION,
+                           "pid": os.getpid()}, fh)
+            os.replace(tmp, str(scout_dir / "bridge.json"))
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    except Exception:
+        app.logger.exception("bridge.json write failed — CLI bridge unavailable")
 
 if __name__ == "__main__":
     port = int(os.getenv("BACKEND_PORT", os.getenv("PORT", "5000")))

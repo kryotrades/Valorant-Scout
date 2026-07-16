@@ -562,6 +562,9 @@ def _hidden_window() -> dict:
 
 def spawn_cli_window(py: str):
     extra = [a for a in sys.argv[1:] if a not in ("--cli", "--no-cli", "--prod")]
+    # A backend is being spawned alongside us — the CLI must attach to its
+    # board bridge and never fetch from Riot itself (one fetcher per launch).
+    extra.append("--bridge")
     cli = str(ROOT / "cli.py")
     try:
         if IS_WIN and ATTACHED:

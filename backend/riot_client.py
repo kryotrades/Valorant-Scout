@@ -53,24 +53,53 @@ except ValueError:
 _RIOT_BURST = _RIOT_MAX_RPS if _RIOT_MAX_RPS > 0 else 1.0
 _RIOT_BUCKET = {"tokens": _RIOT_BURST, "at": 0.0}
 
-def _riot_throttle() -> None:
-    pass
+# /mmr/* endpoints share one server-side bucket: ~30 req per 60s window, then a
+# real 60s block (429 Retry-After=60). match-details/history are far more generous.
+# ponytail: constants measured live 2026-07-16; re-probe if Riot changes limits
+_MMR_BURST = 24.0
+_MMR_RPS = 0.4
+_MMR_BUCKET = {"tokens": _MMR_BURST, "at": 0.0}
+
+_HOLD_UNTIL = {"mmr": 0.0, "other": 0.0}
+
+def _family(endpoint: str) -> str:
+    return "mmr" if endpoint.startswith("/mmr/") else "other"
+
+def held_secs(endpoint: str) -> float:
+    """Seconds until this endpoint's family may dispatch again (0 = clear)."""
+    with _RIOT_RATE_LOCK:
+        return max(0.0, _HOLD_UNTIL[_family(endpoint)] - time.time())
+
+def _set_hold(endpoint: str, seconds: float) -> None:
+    fam = _family(endpoint)
+    with _RIOT_RATE_LOCK:
+        _HOLD_UNTIL[fam] = max(_HOLD_UNTIL[fam], time.time() + seconds)
+
+def _take_token(bucket: dict, burst: float, rps: float) -> None:
+    while True:
+        with _RIOT_RATE_LOCK:
+            now = time.time()
+            if bucket["at"] == 0.0:
+                bucket["at"] = now
+            bucket["tokens"] = min(burst, bucket["tokens"] + (now - bucket["at"]) * rps)
+            bucket["at"] = now
+            if bucket["tokens"] >= 1.0:
+                bucket["tokens"] -= 1.0
+                return
+            wait = (1.0 - bucket["tokens"]) / rps
+        time.sleep(wait)
+
+def _riot_throttle(endpoint: str = "") -> None:
     if _RIOT_MAX_RPS <= 0:
         return
-    with _RIOT_RATE_LOCK:
-        now = time.time()
-        if _RIOT_BUCKET["at"] == 0.0:
-            _RIOT_BUCKET["at"] = now
-        _RIOT_BUCKET["tokens"] = min(
-            _RIOT_BURST,
-            _RIOT_BUCKET["tokens"] + (now - _RIOT_BUCKET["at"]) * _RIOT_MAX_RPS)
-        _RIOT_BUCKET["at"] = now
-        if _RIOT_BUCKET["tokens"] < 1.0:
-            time.sleep((1.0 - _RIOT_BUCKET["tokens"]) / _RIOT_MAX_RPS)
-            _RIOT_BUCKET["tokens"] = 0.0
-            _RIOT_BUCKET["at"] = time.time()
-        else:
-            _RIOT_BUCKET["tokens"] -= 1.0
+    while True:
+        wait = held_secs(endpoint)
+        if wait <= 0:
+            break
+        time.sleep(wait)
+    if _family(endpoint) == "mmr":
+        _take_token(_MMR_BUCKET, _MMR_BURST, _MMR_RPS)
+    _take_token(_RIOT_BUCKET, _RIOT_BURST, _RIOT_MAX_RPS)
 
 class LocalAuth:
     pass
@@ -214,18 +243,21 @@ class LocalAuth:
         pass
         backoff = 3.0
         for attempt in range(retries + 1):
-            _riot_throttle()
+            _riot_throttle(endpoint)
             self.req_count += 1
             resp = requests.get(self.pd_url + endpoint, headers=self.headers(refresh),
                                 verify=False, timeout=8)
             if resp.status_code == 429:
-                if attempt < retries:
 
-                    try:
-                        ra = float(resp.headers.get("Retry-After") or 0)
-                    except (TypeError, ValueError):
-                        ra = 0.0
-                    time.sleep(min(ra or backoff, 30.0))
+                # hold the whole endpoint family for the full Retry-After
+                # (a 60s window capped to 30s just guarantees another 429);
+                # _riot_throttle waits it out for every thread, incl. our retry
+                try:
+                    ra = float(resp.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    ra = 0.0
+                _set_hold(endpoint, ra or backoff)
+                if attempt < retries:
                     backoff += 3.0
                     continue
                 return {"errorCode": "RATE_LIMITED", "status": 429}
@@ -233,7 +265,7 @@ class LocalAuth:
         return {"errorCode": "RATE_LIMITED", "status": 429}
 
     def pd_put(self, endpoint: str, payload, refresh: bool = False) -> dict:
-        _riot_throttle()
+        _riot_throttle(endpoint)
         self.req_count += 1
         return self._json(requests.put(self.pd_url + endpoint, headers=self.headers(refresh),
                                        json=payload, verify=False, timeout=8))

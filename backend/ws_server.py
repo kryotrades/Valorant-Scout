@@ -171,7 +171,7 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
     _FRONTEND_URL = (frontend_url or "http://localhost:3000").rstrip("/")
     ALLOWED_ORIGINS = _build_allowed_origins(_FRONTEND_URL)
     interval = float(poll_interval if poll_interval is not None
-                     else os.getenv("WS_STATE_POLL", "2.0"))
+                     else os.getenv("WS_STATE_POLL", "4.0"))
 
     ready = threading.Event()
     boot_error: list[BaseException] = []

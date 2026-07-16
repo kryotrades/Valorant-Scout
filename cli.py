@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -93,7 +94,66 @@ def _set_window_title(title: str) -> None:
     except Exception:
         pass
 
+# ── Backend bridge (run.py launches us with --bridge) ────────────────────────
+# In normal Scout operation the backend is the ONLY Riot fetcher: we render the
+# board it broadcasts over the local WebSocket bridge and never touch Riot
+# ourselves — not even while disconnected. Standalone `python cli.py` (no flag)
+# is the explicit direct-fetch mode and skips all of this.
+_BRIDGE_PATH = ROOT / ".scout" / "bridge.json"
+_BRIDGE_MODE = False
+_BRIDGE_LOCK = threading.Lock()
+_BRIDGE = {"board": None, "connected": False}
+_BRIDGE_STOP = threading.Event()  # tests only — lets a test retire the thread
+
+def _bridge_loop() -> None:
+    from websockets.sync.client import connect as _ws_connect
+    while not _BRIDGE_STOP.is_set():
+        try:
+            info = json.loads(_BRIDGE_PATH.read_text(encoding="utf-8"))
+            with _ws_connect(f"ws://127.0.0.1:{int(info['wsPort'])}",
+                             open_timeout=5, close_timeout=2) as ws:
+                ws.send(json.dumps({"type": "auth", "token": info.get("token", ""),
+                                    "protocol": info.get("protocol", 1)}))
+                if json.loads(ws.recv(timeout=5)).get("type") != "auth_ok":
+                    raise RuntimeError("bridge auth rejected")
+                while True:
+                    # Server pings every 30s, so a healthy link always yields a
+                    # frame; 60s of silence means a hung backend — reconnect.
+                    msg = json.loads(ws.recv(timeout=60))
+                    if _BRIDGE_STOP.is_set():
+                        return
+                    mtype = msg.get("type")
+                    if mtype == "state" and isinstance(msg.get("data"), dict):
+                        with _BRIDGE_LOCK:
+                            _BRIDGE["board"] = msg["data"]
+                            _BRIDGE["connected"] = True
+                    elif mtype == "ping":
+                        ws.send(json.dumps({"type": "pong"}))
+        except Exception:
+            # Covers it all: backend not up yet, stale bridge.json from a
+            # previous run, backend restart with a new token, mid-game crash.
+            with _BRIDGE_LOCK:
+                _BRIDGE["connected"] = False
+            time.sleep(2.0)
+
+def _bridge_board() -> dict:
+    with _BRIDGE_LOCK:
+        board = _BRIDGE["board"]
+        connected = _BRIDGE["connected"]
+    if board is None:
+        return {"state": "OFFLINE", "stateLabel": "Offline", "source": "bridge",
+                "players": [], "teams": {}, "parties": [],
+                "notice": {"level": "info", "message": "Waiting for backend…"}}
+    board = dict(board)
+    board["sourceDetail"] = "Backend bridge"
+    if not connected:
+        board["notice"] = {"level": "warn",
+                           "message": "Backend connection lost — reconnecting…"}
+    return board
+
 def build_board(seed: int) -> dict:
+    if _BRIDGE_MODE:
+        return _bridge_board()
     pref = os.environ.get("DATA_SOURCE", "auto").lower()
     if pref != "demo" and LocalAuth.available():
         try:
@@ -237,8 +297,17 @@ def main():
     ap.add_argument("--once", action="store_true", help="print once and exit")
     ap.add_argument("--interval", type=float, default=5.0, help="refresh seconds")
     ap.add_argument("--seed", type=int, default=7, help="demo lobby seed")
+    ap.add_argument("--bridge", action="store_true",
+                    help="render the backend's board over the local WebSocket "
+                         "bridge; never fetch from Riot directly")
 
     args, _ = ap.parse_known_args()
+
+    if args.bridge:
+        global _BRIDGE_MODE
+        _BRIDGE_MODE = True
+        threading.Thread(target=_bridge_loop, daemon=True,
+                         name="scout-bridge").start()
 
     _set_window_title("Valorant Scout — Scoreboard")
 
