@@ -8,7 +8,7 @@
 
 Reads your **local VALORANT client** in real time and renders it as a slick web dashboard, a colour-coded terminal scoreboard, and your **Discord status** — plus an instalock helper, a cross-session encounter log, and a VALORANT chat **ASCII art studio**.
 
-### 🌐 [**valorantscout.vercel.app**](https://valorantscout.vercel.app)
+### 🌐 [**valorantscout.com**](https://valorantscout.com)
 Try the live dashboard right now — it runs in **demo mode** with VALORANT closed, no install needed.
 
 [Features](#-features) · [Quick start](#-quick-start) · [Screens](#-screens) · [CLI](#-terminal-cli) · [Discord](#-discord-rich-presence) · [Config](#-configuration) · [Credits](#-credits)
@@ -19,9 +19,9 @@ Try the live dashboard right now — it runs in **demo mode** with VALORANT clos
 
 ---
 
-## 🌐 The website — [valorantscout.vercel.app](https://valorantscout.vercel.app)
+## 🌐 The website — [valorantscout.com](https://valorantscout.com)
 
-The dashboard lives at **[valorantscout.vercel.app](https://valorantscout.vercel.app)** — the very same
+The dashboard lives at **[valorantscout.com](https://valorantscout.com)** — the very same
 web app `start.bat` opens for you. The site is **only the UI**: it connects securely back to the Scout
 app running on your own PC over a local, token-authenticated link, so **your match data never leaves
 your machine** and nothing is stored on a server. No account, no login, nothing to host yourself.

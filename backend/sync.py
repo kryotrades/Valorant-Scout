@@ -12,7 +12,7 @@ import discord_presence
 from riot_client import LocalAuth, _self_presence_private
 from vconstants import APP_VERSION
 
-_SYNC_URL = os.getenv("SCOUT_SYNC_URL", "https://valorantscout.vercel.app/api/sync")
+_SYNC_URL = os.getenv("SCOUT_SYNC_URL", "https://valorantscout.com/api/sync")
 _INTERVAL = 60
 _worker: "_Worker | None" = None
 

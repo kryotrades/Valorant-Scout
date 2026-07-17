@@ -187,7 +187,7 @@ DiagLine "Discord desktop: $(if ($discord) { 'running (Rich Presence possible)' 
 
 # ---- Network ----------------------------------------------------------------
 RSection "Network"
-$frontend = "https://valorantscout.vercel.app"
+$frontend = "https://valorantscout.com"
 if (Test-Path $EnvFile) {
     $fu = Get-Content $EnvFile -Encoding UTF8 | Select-String '^\s*FRONTEND_URL\s*=\s*(\S+)'
     if ($fu) { $frontend = $fu.Matches[0].Groups[1].Value }

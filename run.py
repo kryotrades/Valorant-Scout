@@ -36,7 +36,7 @@ FRONTEND = ROOT / "frontend"
 SCOUT_DIR = ROOT / ".scout"
 IS_WIN = os.name == "nt"
 
-HOSTED_FRONTEND = "https://valorantscout.vercel.app"
+HOSTED_FRONTEND = "https://valorantscout.com"
 
 sys.path.insert(0, str(BACKEND))
 try:
