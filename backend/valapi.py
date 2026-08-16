@@ -127,6 +127,12 @@ def _tiers_map() -> dict:
 def rank_icon(tier: int):
     return (_tiers_map().get(int(tier or 0)) or {}).get("icon")
 
+def cached_rank_icon(tier: int):
+    tiers = _cache.get("_tiers")
+    if not isinstance(tiers, dict):
+        return None
+    return (tiers.get(int(tier or 0)) or {}).get("icon")
+
 def _titles_map() -> dict:
     if "_titles" in _cache:
         return _cache["_titles"]

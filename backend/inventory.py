@@ -24,20 +24,28 @@ _TIER_VP = {
     "e046854e-406c-37f4-6607-19a9ba8426fc": 2175,
     "411e4a55-4e59-7757-41f0-86a53f101bb5": 2475,
 }
+_TIER_NAMES = {
+    "12683d76-48d7-84a3-4e09-6985794f0445": "Select",
+    "0cebb8be-46d7-c12a-d306-e9907bfc5a25": "Deluxe",
+    "60bca009-4182-7998-dee7-b8a2558dc369": "Premium",
+    "e046854e-406c-37f4-6607-19a9ba8426fc": "Exclusive",
+    "411e4a55-4e59-7757-41f0-86a53f101bb5": "Ultra",
+}
 
 _MELEE_VP = 3550
 
 _VP_PER_USD = 107.0
 
 _LOCK = threading.Lock()
-_CACHE: dict = {"at": 0.0, "data": None}
+_CACHE: dict[str, dict] = {}
 _TTL = 600.0
 
-def last_good() -> dict | None:
+def last_good(puuid: str | None = None) -> dict | None:
     with _LOCK:
-        if not _CACHE["data"]:
+        cached = _CACHE.get(str(puuid)) if puuid else None
+        if not cached or not cached.get("data"):
             return None
-        return {**_CACHE["data"], "stale": True}
+        return {**cached["data"], "stale": True}
 
 
 def _contract_rewards() -> set:
@@ -66,10 +74,12 @@ def _base_levels() -> dict:
             if not vp or not levels:
                 continue
             base = levels[0]
+            tier_uuid = (skin.get("contentTierUuid") or "").lower()
             out[base["uuid"].lower()] = {
                 "name": (skin.get("displayName") or "").strip(),
                 "icon": base.get("displayIcon") or skin.get("displayIcon"),
                 "vp": _MELEE_VP if melee else vp,
+                "tier": _TIER_NAMES.get(tier_uuid, "Exclusive" if melee else "Other"),
             }
     valapi._cache["_baselevels"] = out
     return out
@@ -81,10 +91,12 @@ def _owned_ids(auth, item_type: str) -> list[str]:
 
 def snapshot(auth) -> dict:
     now = time.time()
-    with _LOCK:
-        if _CACHE["data"] and now - _CACHE["at"] < _TTL:
-            return _CACHE["data"]
     auth.headers()
+    owner = str(auth.puuid)
+    with _LOCK:
+        cached = _CACHE.get(owner)
+        if cached and cached.get("data") and now - cached.get("at", 0) < _TTL:
+            return cached["data"]
 
     owned = _owned_ids(auth, ITEM_TYPES["skins"])
     base = _base_levels()
@@ -103,6 +115,17 @@ def snapshot(auth) -> dict:
         total += meta["vp"]
         priced.append(meta)
     priced.sort(key=lambda s: s["vp"], reverse=True)
+    tiers = {}
+    for item in priced:
+        bucket = tiers.setdefault(item.get("tier") or "Other", {"skins": 0, "vp": 0})
+        bucket["skins"] += 1
+        bucket["vp"] += item["vp"]
+
+    previous_ids = set((cached or {}).get("ownedIds") or [])
+    current_ids = {sid for sid in owned if sid in base and sid not in freebies}
+    recent_ids = current_ids - previous_ids if previous_ids else set()
+    recent = [base[sid] for sid in recent_ids if sid in base]
+    recent.sort(key=lambda item: item["vp"], reverse=True)
 
     wallet = (auth.pd_get(f"/store/v1/wallet/{auth.puuid}") or {}).get("Balances") or {}
 
@@ -120,11 +143,13 @@ def snapshot(auth) -> dict:
         "wallet": {"vp": wallet.get(_CUR_VP, 0), "rad": wallet.get(_CUR_RAD, 0),
                    "kc": wallet.get(_CUR_KC, 0)},
         "counts": counts,
-        "top": priced[:10],
+        "tiers": tiers,
+        "top": priced[:20],
+        "recent": recent[:8],
         "at": int(now),
     }
     with _LOCK:
-        _CACHE["at"], _CACHE["data"] = now, data
+        _CACHE[owner] = {"at": now, "data": data, "ownedIds": sorted(current_ids)}
     return data
 
 

@@ -19,6 +19,10 @@ ALLOWED_COMMANDS = {
     "offline_status",
     "offline_toggle",
     "reset_session",
+    "start_session",
+    "end_session",
+    "delete_session",
+    "update_match_meta",
 }
 
 ACK_FIELDS = (
@@ -26,6 +30,7 @@ ACK_FIELDS = (
     "configured", "perMap", "rateLimited", "dedup",
     "queue", "queueId", "inQueue",
     "running", "active", "enabled", "connected", "friendsLoaded",
+    "session", "sessions", "sessionId", "meta", "matchId", "deprecated",
 )
 
 RATE_LIMIT = 5
@@ -116,6 +121,14 @@ class CommandRouter:
                 return self._offline_toggle(payload)
             if command == "reset_session":
                 return self._reset_session(payload)
+            if command == "start_session":
+                return self._start_session(payload)
+            if command == "end_session":
+                return self._end_session(payload)
+            if command == "delete_session":
+                return self._delete_session(payload)
+            if command == "update_match_meta":
+                return self._update_match_meta(payload)
         except Exception as e:
             return {"ok": False, "message": f"Command failed: {e}"}
         return {"ok": False, "message": f"Unhandled command '{command}'."}
@@ -209,9 +222,31 @@ class CommandRouter:
             return offline_launch.set_status(str(payload.get("status")))
         return offline_launch.set_enabled(bool(payload.get("enabled", True)))
 
-    def _reset_session(self, _payload: dict) -> dict:
+    def _owner(self) -> str | None:
+        return (self.board_provider() or {}).get("selfPuuid")
+
+    def _reset_session(self, payload: dict) -> dict:
         import session_tracker
-        return session_tracker.reset()
+        return session_tracker.reset(self._owner(), payload.get("goal"))
+
+    def _start_session(self, payload: dict) -> dict:
+        import history
+        import session_tracker
+        owner = self._owner()
+        baseline = history.payload(owner).get("summary", {}) if owner else None
+        return session_tracker.start(owner, payload.get("goal"), baseline)
+
+    def _end_session(self, _payload: dict) -> dict:
+        import session_tracker
+        return session_tracker.end(self._owner())
+
+    def _delete_session(self, payload: dict) -> dict:
+        import session_tracker
+        return session_tracker.delete(self._owner(), str(payload.get("sessionId") or "").strip())
+
+    def _update_match_meta(self, payload: dict) -> dict:
+        import match_meta
+        return match_meta.update(self._owner(), str(payload.get("matchId") or "").strip(), payload)
 
     def _enable_remote(self, _payload: dict) -> dict:
         if self.remote_controller is None:

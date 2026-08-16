@@ -25,6 +25,7 @@ import sample_match
 import session_tracker
 import history
 import inventory
+import match_meta
 from agents import AGENTS, resolve_agent
 from instalock_worker import InstalockWorker
 from riot_client import REGIONS, LocalAuth, RiotClient, ClientNotReady
@@ -32,6 +33,7 @@ from vconstants import APP_VERSION, STATES, rank_from_tier
 
 app = Flask(__name__)
 CORS(app)
+_COMMAND_ROUTER = None
 
 for _h in scoutlog.get_logger("backend").handlers:
     app.logger.addHandler(_h)
@@ -41,6 +43,8 @@ instalock_worker = InstalockWorker()
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = float(os.getenv("PLAYER_CACHE_TTL", "60"))
+_ENCOUNTER_BACKFILL_AT: dict[str, float] = {}
+_ENCOUNTER_BACKFILL_LOCK = threading.Lock()
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "data", "settings.json")
 _SETTINGS_LOCK = threading.Lock()
@@ -193,7 +197,7 @@ def _attach_encounters(board: dict) -> dict:
     for p in board.get("players") or []:
         if not isinstance(p, dict):
             continue
-        enc = encounter_log.encounter_for(p.get("puuid")) if is_live else None
+        enc = encounter_log.encounter_for(board.get("selfPuuid"), p.get("puuid")) if is_live else None
 
         if enc:
             if self_team is not None and p.get("team") == self_team:
@@ -298,12 +302,59 @@ def live():
         seed = 7
     return jsonify(build_live(seed, request.args.get("state")))
 
+
+def _refresh_encounter_history(owner: str | None) -> None:
+    if not owner or not _live_enabled():
+        return
+    now = time.time()
+    with _ENCOUNTER_BACKFILL_LOCK:
+        if now - _ENCOUNTER_BACKFILL_AT.get(owner, 0) < 600:
+            return
+        _ENCOUNTER_BACKFILL_AT[owner] = now
+        try:
+            lm = live_match.LiveMatch(LocalAuth())
+            career = lm.player_career(owner, count=10)
+            encounter_log.backfill_career(owner, career.get("matches") or [])
+
+            season = lm.season_id()
+            previous_season = lm.prev_season_id()
+            for teammate in (career.get("coPlayers") or [])[:6]:
+                if int(teammate.get("sharedMatches") or 0) < 2:
+                    continue
+                puuid = teammate.get("puuid")
+                if not puuid:
+                    continue
+                rank = lm.rank_info(puuid, season, previous_season)
+                tier = int(rank.get("tier") or 0)
+                if tier <= 0:
+                    continue
+                current = rank_from_tier(tier)
+                peak = rank_from_tier(rank.get("peak") or tier)
+                encounter_log.enrich_player(owner, puuid, {
+                    "name": teammate.get("name"),
+                    "rank": current["name"],
+                    "peakRank": peak["name"],
+                    "rankTier": current["tier"],
+                    "peakTier": peak["tier"],
+                    "rankColor": current["color"],
+                    "winRate": rank.get("wr"),
+                })
+        except Exception:
+            _ENCOUNTER_BACKFILL_AT.pop(owner, None)
+            app.logger.exception("encounter history backfill failed")
+
 @app.get("/api/encounters")
 def encounters():
     pass
     if client.source_pref == "demo":
-        return jsonify({"players": sample_match.encounters()})
-    return jsonify({"players": encounter_log.get_all()})
+        return jsonify({"players": sample_match.encounters(), "accountCount": 1,
+                        "scope": request.args.get("scope", "current")})
+    owner = _current_puuid()
+    _refresh_encounter_history(owner)
+    scope = "all" if request.args.get("scope") == "all" else "current"
+    return jsonify({"players": encounter_log.get_all_accounts(owner) if scope == "all"
+                    else encounter_log.get_all(owner),
+                    "accountCount": encounter_log.account_count(), "scope": scope})
 
 @app.get("/api/recap")
 def recap():
@@ -316,22 +367,103 @@ def recap():
     return jsonify(live_recap or sample_match.recap(seed))
 
 
+def _current_puuid() -> str | None:
+    if not _live_enabled():
+        return None
+    try:
+        auth = LocalAuth()
+        auth.headers()
+        return auth.puuid
+    except Exception:
+        return None
+
+
+@app.get("/api/sessions")
+def sessions_get():
+    return jsonify(session_tracker.list_for(_current_puuid()))
+
+
+@app.post("/api/session/start")
+def session_start():
+    owner = _current_puuid()
+    baseline = history.payload(owner).get("summary", {}) if owner else None
+    return jsonify(session_tracker.start(owner, (request.get_json(silent=True) or {}).get("goal"), baseline))
+
+
+@app.post("/api/session/end")
+def session_end():
+    return jsonify(session_tracker.end(_current_puuid()))
+
+
+@app.delete("/api/sessions/<session_id>")
+def session_delete(session_id: str):
+    return jsonify(session_tracker.delete(_current_puuid(), session_id.strip()))
+
+
 @app.post("/api/session/reset")
 def session_reset():
-    return jsonify(session_tracker.reset())
+    body = request.get_json(silent=True) or {}
+    return jsonify(session_tracker.reset(_current_puuid(), body.get("goal")))
 
 
-def _insights_payload() -> dict:
+@app.post("/api/remote-mode")
+def remote_mode():
+    if _COMMAND_ROUTER is None:
+        return jsonify({"ok": False, "configured": False,
+                        "message": "The local command bridge is still starting."}), 503
+    body = request.get_json(silent=True) or {}
+    action = "disable_remote" if body.get("action") == "disable" else "enable_remote"
+    result = _COMMAND_ROUTER.execute(
+        client_id=f"http:{request.remote_addr or 'local'}", command=action,
+        payload={}, command_id=body.get("id"))
+    return jsonify(result)
+
+
+def _insights_payload(timezone_name: str | None = None) -> dict:
+    puuid = None
     if _live_enabled():
         try:
-            history.refresh(LocalAuth())
+            auth = LocalAuth()
+            auth.headers()
+            puuid = auth.puuid
+            threading.Thread(target=history.refresh,
+                             args=(auth, timezone_name), daemon=True,
+                             name=f"rr-refresh-{str(puuid)[:8]}").start()
         except Exception:
             app.logger.exception("rr history refresh failed")
-    return history.payload()
+    return history.payload(puuid, timezone_name)
+
+
+def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20) -> dict:
+    payload = _insights_payload(timezone_name)
+    owner = (payload.get("account") or {}).get("puuid")
+    if owner and _live_enabled():
+        def enrich_recent():
+            try:
+                history.enrich(live_match.LiveMatch(LocalAuth()), owner, rich_limit)
+            except Exception:
+                app.logger.exception("performance enrichment failed")
+        threading.Thread(target=enrich_recent, daemon=True,
+                         name=f"perf-enrich-{str(owner)[:8]}").start()
+    if owner:
+        session_tracker.ensure_active(owner, payload.get("summary", {}))
+    payload["sessions"] = session_tracker.list_for(owner)
+    payload["matchMeta"] = match_meta.get_all(owner)
+    payload["encounters"] = encounter_log.get_all(owner)
+    return payload
 
 @app.get("/api/insights")
 def insights():
-    return jsonify(_insights_payload())
+    return jsonify(_insights_payload(request.args.get("tz")))
+
+
+@app.get("/api/performance")
+def performance():
+    try:
+        rich_limit = int(request.args.get("richLimit", 20))
+    except (TypeError, ValueError):
+        rich_limit = 20
+    return jsonify(_performance_payload(request.args.get("tz"), rich_limit))
 
 def _inventory_payload() -> dict:
     if not _live_enabled():
@@ -340,17 +472,22 @@ def _inventory_payload() -> dict:
             "retryable": client.source_pref != "demo",
             "error": "Live client not available.",
         }
+    auth = LocalAuth()
+    owner = None
     try:
-        return inventory.snapshot(LocalAuth())
+        data = inventory.snapshot(auth)
+        owner = getattr(auth, "puuid", None)
+        return data
     except ClientNotReady:
-        cached = inventory.last_good()
+        owner = getattr(auth, "puuid", None)
+        cached = inventory.last_good(owner)
         if cached:
             return cached
         return {"available": False, "retryable": True,
                 "error": "Your collection is still loading from Riot."}
     except Exception:
         app.logger.exception("inventory snapshot failed")
-        cached = inventory.last_good()
+        cached = inventory.last_good(owner)
         if cached:
             return cached
         return {"available": False,
@@ -364,7 +501,12 @@ def inventory_route():
 @app.get("/api/encounters/<puuid>")
 def encounter(puuid: str):
     pass
-    return jsonify(encounter_log.get_one(puuid.strip()))
+    return jsonify(encounter_log.get_one(_current_puuid(), puuid.strip()))
+
+
+@app.put("/api/matches/<match_id>/meta")
+def match_meta_update(match_id: str):
+    return jsonify(match_meta.update(_current_puuid(), match_id.strip(), request.get_json(silent=True) or {}))
 
 @app.get("/api/match/<match_id>")
 def match(match_id: str):
@@ -592,7 +734,7 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
 
             out["weapons"] = _current_weapons(puuid)
             try:
-                out["encounter"] = encounter_log.get_one(puuid)
+                out["encounter"] = encounter_log.get_one(_current_puuid(), puuid)
             except Exception:
                 out["encounter"] = None
             return out
@@ -612,7 +754,7 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             return sample_match.match_detail(match_id, subject)
 
         if req_type == "encounter":
-            return encounter_log.get_one((params.get("puuid") or "").strip()) or {}
+            return encounter_log.get_one(_current_puuid(), (params.get("puuid") or "").strip()) or {}
 
         if req_type == "recap":
 
@@ -620,10 +762,24 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             return live_recap or sample_match.recap(int(params.get("seed") or 7))
 
         if req_type == "encounters":
-            return {"players": encounter_log.get_all()}
+            owner = _current_puuid()
+            _refresh_encounter_history(owner)
+            scope = "all" if params.get("scope") == "all" else "current"
+            return {"players": encounter_log.get_all_accounts(owner) if scope == "all"
+                    else encounter_log.get_all(owner),
+                    "accountCount": encounter_log.account_count(), "scope": scope}
 
         if req_type == "insights":
-            return _insights_payload()
+            return _insights_payload(params.get("tz"))
+
+        if req_type == "performance":
+            return _performance_payload(params.get("tz"), int(params.get("richLimit") or 20))
+
+        if req_type == "sessions":
+            return session_tracker.list_for(_current_puuid())
+
+        if req_type == "match_meta":
+            return match_meta.get_one(_current_puuid(), (params.get("matchId") or "").strip())
 
         if req_type == "inventory":
             return _inventory_payload()
@@ -633,6 +789,7 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
 
 def _start_ws_bridge() -> None:
     pass
+    global _COMMAND_ROUTER
     import ws_server
     import scout_commands
     import remote_ably
@@ -656,6 +813,7 @@ def _start_ws_bridge() -> None:
     router = scout_commands.CommandRouter(
         instalock_worker=instalock_worker, riot_client=client,
         board_provider=ws_state_provider, remote_controller=remote_controller)
+    _COMMAND_ROUTER = router
     remote_controller.attach_router(router)
 
     try:

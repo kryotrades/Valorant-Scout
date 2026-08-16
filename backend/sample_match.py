@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import time
+from datetime import datetime
 
 import sample_data
 import valapi
@@ -261,6 +262,10 @@ def match_detail(match_id: str, subject: str = None) -> dict:
         agent = resolve_agent(agents[i]) or {}
         is_subject = bool(subject and i == 0)
         k, d, a = rng.randint(8, 30), rng.randint(8, 24), rng.randint(2, 12)
+        tier = rng.randint(10, 23)
+        peak_tier = min(27, tier + rng.randint(0, 3))
+        rank = rank_from_tier(tier)
+        peak = rank_from_tier(peak_tier)
         players.append({
             "puuid": subject if is_subject else _puuid(rng),
             "name": "This player" if is_subject else _name(rng),
@@ -272,14 +277,29 @@ def match_detail(match_id: str, subject: str = None) -> dict:
             "kd": round(k / d, 2) if d else float(k),
             "acs": rng.randint(120, 320),
             "hsPct": rng.randint(12, 40),
+            "rankTier": tier, "rank": rank["name"], "rankColor": rank["color"],
+            "rankIcon": valapi.rank_icon(tier), "rr": rng.randint(0, 99),
+            "peakRankTier": peak_tier, "peakRank": peak["name"],
+            "peakColor": peak["color"], "peakIcon": valapi.rank_icon(peak_tier),
+            "level": rng.randint(25, 430), "playerCard": valapi.player_card(rng.choice(_CARDS)),
             "isSubject": is_subject,
         })
     players.sort(key=lambda x: -x["acs"])
+    players[0]["isMatchMvp"] = True
+    subject_team = next((p["team"] for p in players if p["isSubject"]), "Blue")
+    next((p for p in players if p["team"] == subject_team), players[0])["isTeamMvp"] = True
+    team_stats = {}
+    for team in ("Blue", "Red"):
+        tier = round(sum(p["rankTier"] for p in players if p["team"] == team) / 5)
+        rank = rank_from_tier(tier)
+        team_stats[team] = {"avgRankTier": tier, "avgRank": rank["name"],
+                            "avgRankColor": rank["color"], "rankIcon": valapi.rank_icon(tier)}
     return {
-        "matchId": match_id, "map": map_name, "mode": "Competitive",
+        "matchId": match_id, "map": map_name, "mapSplash": valapi.map_splash(map_name),
+        "mode": "Competitive",
         "scores": {"Blue": rw, "Red": rl},
         "result": ("Victory" if blue_won else "Defeat") if subject else None,
-        "players": players,
+        "players": players, "teamStats": team_stats,
     }
 
 def recap(seed: int = 7) -> dict:
@@ -297,6 +317,8 @@ def recap(seed: int = 7) -> dict:
         "map": detail["map"], "mode": detail["mode"],
         "result": detail["result"], "scores": detail["scores"],
         "mvp": mvp, "teamMvp": team_mvp if team_mvp is not mvp else None,
+        "players": players, "mapSplash": detail.get("mapSplash"),
+        "teamStats": detail.get("teamStats"),
         "you": you, "yourAvgKd": round(rng.uniform(0.8, 1.4), 2),
         "rrDelta": delta, "tierAfter": rng.randint(11, 24),
         "rrAfter": rng.randint(0, 99),
@@ -354,15 +376,25 @@ def career(puuid: str) -> dict:
     pass
     raw = sample_data.generate_player(puuid, match_count=10)
     matches = []
+    rr_rng = random.Random(sum(ord(ch) for ch in puuid) + 41)
+    tier_after = raw.get("rankTier") or 16
+    rr_after = raw.get("rr") or 50
     for i, m in enumerate(raw["matches"]):
         st = m["stats"]
         agent = resolve_agent(m["agent"]) or {}
+        is_comp = m["mode"] == "Competitive"
+        delta = (rr_rng.randint(14, 24) if m["result"] == "Victory" else
+                 -rr_rng.randint(12, 22) if m["result"] == "Defeat" else 0) if is_comp else None
+        rank = rank_from_tier(tier_after)
         matches.append({
             "matchId": m["matchId"],
             "map": m["map"],
+            "mapSplash": valapi.map_splash(m["map"]),
             "mode": m["mode"],
-            "startMillis": i,
+            "startMillis": int(datetime.fromisoformat(m["date"]).timestamp() * 1000),
             "result": m["result"],
+            "score": m.get("roundsWon"),
+            "opponentScore": m.get("roundsLost"),
             "agent": m["agent"],
             "agentPortrait": agent.get("portrait"),
             "agentColor": agent.get("color", "#8B978F"),
@@ -372,6 +404,13 @@ def career(puuid: str) -> dict:
             "kd": round(st["kills"] / st["deaths"], 2) if st["deaths"] else float(st["kills"]),
             "acs": st["acs"],
             "hsPct": round(st["hsPct"]),
+            "partySize": len(m["teammates"]) + 1,
+            "rrDelta": delta,
+            "tierAfter": tier_after if is_comp else None,
+            "rrAfter": rr_after if is_comp else None,
+            "rankAfter": rank["name"] if is_comp else None,
+            "rankColor": rank["color"] if is_comp else None,
+            "rankIcon": valapi.rank_icon(tier_after) if is_comp else None,
             "teammates": [{"puuid": t["puuid"], "name": t["name"], "agent": t["agent"]}
                           for t in m["teammates"]],
         })

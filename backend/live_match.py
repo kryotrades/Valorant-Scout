@@ -1021,7 +1021,7 @@ class LiveMatch:
 
         matches, mate_puuids = [], set()
         if mids:
-            with ThreadPoolExecutor(max_workers=min(8, len(mids))) as ex:
+            with ThreadPoolExecutor(max_workers=min(4, len(mids))) as ex:
                 for row in ex.map(fetch_detail, mids):
                     if row:
                         matches.append(row)
@@ -1031,6 +1031,32 @@ class LiveMatch:
         for row in matches:
             for mate in row["teammates"]:
                 mate["name"] = names.get(mate["puuid"]) or _fallback_name(mate["puuid"])
+
+        updates = {}
+        if any((row.get("mode") or "").lower() == "competitive" for row in matches):
+            try:
+                cu = self.auth.pd_get(
+                    f"/mmr/v1/players/{puuid}/competitiveupdates"
+                    f"?startIndex=0&endIndex={min(20, max(10, count))}&queue=competitive")
+                for update in (cu or {}).get("Matches", []) or []:
+                    if update.get("MatchID"):
+                        updates[update["MatchID"]] = update
+            except Exception:
+                updates = {}
+        for row in matches:
+            update = updates.get(row.get("matchId"))
+            if not update:
+                continue
+            tier = update.get("TierAfterUpdate")
+            rank = rank_from_tier(tier or 0)
+            row.update({
+                "rrDelta": update.get("RankedRatingEarned"),
+                "tierAfter": tier,
+                "rrAfter": update.get("RankedRatingAfterUpdate"),
+                "rankAfter": rank.get("name"),
+                "rankColor": rank.get("color"),
+                "rankIcon": valapi.rank_icon(tier or 0) if tier else None,
+            })
 
         return {"source": "local", "puuid": puuid, "matches": matches,
                 **_career_summary(matches)}
@@ -1049,29 +1075,62 @@ class LiveMatch:
         won = mine.get("won")
         rounds = max((t.get("roundsWon", 0) for t in teams.values()), default=0) +            min((t.get("roundsWon", 0) for t in teams.values()), default=0)
 
-        hits = heads = 0
+        hits_by_player: dict[str, int] = {}
+        heads_by_player: dict[str, int] = {}
         for rr in md.get("roundResults", []):
             for ps in rr.get("playerStats", []):
-                if ps.get("subject") == puuid:
-                    for dmg in ps.get("damage", []):
-                        hits += dmg.get("legshots", 0) + dmg.get("bodyshots", 0) + dmg.get("headshots", 0)
-                        heads += dmg.get("headshots", 0)
+                player_id = ps.get("subject")
+                if not player_id:
+                    continue
+                for dmg in ps.get("damage", []):
+                    hits_by_player[player_id] = hits_by_player.get(player_id, 0) + \
+                        dmg.get("legshots", 0) + dmg.get("bodyshots", 0) + dmg.get("headshots", 0)
+                    heads_by_player[player_id] = heads_by_player.get(player_id, 0) + dmg.get("headshots", 0)
 
         kills, deaths = st.get("kills", 0), st.get("deaths", 0)
+        hits = hits_by_player.get(puuid, 0)
+        heads = heads_by_player.get(puuid, 0)
         agent = resolve_agent((subj.get("characterId") or "")) or {}
-        teammates = [
-            {"puuid": p.get("subject"),
-             "agent": (resolve_agent(p.get("characterId") or "") or {}).get("name", "Unknown")}
-            for p in players
-            if p.get("teamId") == team_id and p.get("subject") != puuid
-        ]
+        teammates = []
+        for player in players:
+            player_id = player.get("subject")
+            if player.get("teamId") != team_id or player_id == puuid:
+                continue
+            player_stats = player.get("stats", {}) or {}
+            teammate_agent = resolve_agent(player.get("characterId") or "") or {}
+            teammate_hits = hits_by_player.get(player_id, 0)
+            teammates.append({
+                "puuid": player_id,
+                "agent": teammate_agent.get("name", "Unknown"),
+                "agentPortrait": teammate_agent.get("portrait"),
+                "agentColor": teammate_agent.get("color", "#8B978F"),
+                "level": (player.get("accountLevel") or
+                          ((player.get("PlayerIdentity") or player.get("playerIdentity") or {})
+                           .get("AccountLevel"))),
+                "kills": player_stats.get("kills", 0),
+                "deaths": player_stats.get("deaths", 0),
+                "assists": player_stats.get("assists", 0),
+                "acs": round(player_stats.get("score", 0) / rounds) if rounds else 0,
+                "shotsHit": teammate_hits,
+                "headshots": heads_by_player.get(player_id, 0),
+            })
+        party_id = subj.get("partyId")
+        party_size = (sum(p.get("partyId") == party_id for p in players)
+                      if party_id else 1)
         queue = info.get("queueID") or info.get("queueId") or ""
+        map_name = map_name_from_path(info.get("mapId", ""))
+        opponent_score = next((team.get("roundsWon", 0) for tid, team in teams.items()
+                               if tid != team_id), None)
         return {
             "matchId": mid or info.get("matchId", ""),
-            "map": map_name_from_path(info.get("mapId", "")),
+            "map": map_name,
+            "mapSplash": valapi.map_splash(map_name),
             "mode": _mode_label(queue),
             "startMillis": info.get("gameStartMillis", 0),
             "result": "Victory" if won is True else "Defeat" if won is False else "Draw",
+            "team": team_id,
+            "score": mine.get("roundsWon", 0),
+            "opponentScore": opponent_score,
             "agent": agent.get("name", "Unknown"),
             "agentPortrait": agent.get("portrait"),
             "agentColor": agent.get("color", "#8B978F"),
@@ -1081,6 +1140,8 @@ class LiveMatch:
             "kd": round(kills / deaths, 2) if deaths else float(kills),
             "acs": round(st.get("score", 0) / rounds) if rounds else 0,
             "hsPct": round(heads / hits * 100) if hits else None,
+            "partySize": max(1, party_size),
+            "scores": {tid: team.get("roundsWon", 0) for tid, team in teams.items()},
             "teammates": teammates,
         }
 
@@ -1104,11 +1165,24 @@ class LiveMatch:
 
         raw = md.get("players", []) or []
         names = self.reveal_names([p.get("subject") for p in raw])
+        season = self.season_id()
+        prev_season = self.prev_season_id()
+
+        def fetch_rank(player):
+            puuid = player.get("subject")
+            return puuid, self.rank_info(puuid, season, prev_season) if puuid else {}
+
+        with ThreadPoolExecutor(max_workers=min(3, len(raw) or 1)) as ex:
+            ranks = dict(ex.map(fetch_rank, raw))
         players = []
         for p in raw:
             sub = p.get("subject")
             st = p.get("stats", {}) or {}
             agent = resolve_agent(p.get("characterId") or "") or {}
+            identity = p.get("PlayerIdentity") or p.get("playerIdentity") or {}
+            rank = ranks.get(sub) or {}
+            rank_meta = rank_from_tier(rank.get("tier") or 0)
+            peak_meta = rank_from_tier(rank.get("peak") or 0)
             k, d, a = st.get("kills", 0), st.get("deaths", 0), st.get("assists", 0)
             th = hits.get(sub, 0)
             stored = (f"{p.get('gameName')}#{p.get('tagLine')}"
@@ -1124,6 +1198,14 @@ class LiveMatch:
                 "kd": round(k / d, 2) if d else float(k),
                 "acs": round(st.get("score", 0) / rounds) if rounds else 0,
                 "hsPct": round(heads.get(sub, 0) / th * 100) if th else None,
+                "rankTier": rank_meta["tier"], "rank": rank_meta["name"],
+                "rankColor": rank_meta["color"], "rankIcon": valapi.rank_icon(rank_meta["tier"]),
+                "rr": rank.get("rr") or 0, "leaderboard": rank.get("lb") or 0,
+                "peakRankTier": peak_meta["tier"], "peakRank": peak_meta["name"],
+                "peakColor": peak_meta["color"], "peakIcon": valapi.rank_icon(peak_meta["tier"]),
+                "level": p.get("accountLevel") or identity.get("AccountLevel") or 0,
+                "playerCard": valapi.player_card(identity.get("PlayerCardID") or
+                                                   p.get("playerCard") or p.get("playerCardId")),
                 "isSubject": sub == subject,
             })
         players.sort(key=lambda x: -x["acs"])
@@ -1133,14 +1215,31 @@ class LiveMatch:
             sp = next((p for p in raw if p.get("subject") == subject), None)
             if sp:
                 won = teams.get(sp.get("teamId"), {}).get("won")
+        subject_team = next((p.get("team") for p in players if p.get("isSubject")), None)
+        if players:
+            players[0]["isMatchMvp"] = True
+        team_mvp = next((p for p in players if p.get("team") == subject_team), None)
+        if team_mvp:
+            team_mvp["isTeamMvp"] = True
+        team_stats = {}
+        for team_id in teams:
+            team_players = [p for p in players if p.get("team") == team_id]
+            rated = [p.get("rankTier") for p in team_players if (p.get("rankTier") or 0) > 0]
+            avg_tier = round(sum(rated) / len(rated)) if rated else 0
+            avg_rank = rank_from_tier(avg_tier)
+            team_stats[team_id] = {"avgRankTier": avg_tier, "avgRank": avg_rank["name"],
+                                   "avgRankColor": avg_rank["color"],
+                                   "rankIcon": valapi.rank_icon(avg_tier) if avg_tier else None}
+        map_name = map_name_from_path(info.get("mapId", ""))
         return {
             "matchId": match_id,
-            "map": map_name_from_path(info.get("mapId", "")),
+            "map": map_name,
+            "mapSplash": valapi.map_splash(map_name),
             "mode": _mode_label(info.get("queueID") or info.get("queueId") or ""),
             "scores": {tid: t.get("roundsWon", 0) for tid, t in teams.items()},
             "result": ("Victory" if won is True else "Defeat" if won is False
                        else ("Draw" if won is not None else None)),
-            "players": players,
+            "players": players, "teamStats": team_stats,
         }
 
 def _career_summary(matches: list) -> dict:
