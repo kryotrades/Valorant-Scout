@@ -6,14 +6,14 @@
 
 **Live in-match intelligence for VALORANT — see every player's rank, peak, K/D, win-rate, smurf risk, full skin inventory and party before the round even starts.**
 
-Reads your **local VALORANT client** in real time and renders it as a slick web dashboard, a colour-coded terminal scoreboard, and your **Discord status** — plus **appear offline**, your **collection value**, **rank/RR history**, an interactive **lineup lab**, a **209-crosshair studio**, a **647-player sensitivity lab**, an instalock helper, a cross-session encounter log, and a VALORANT chat **ASCII art studio**.
+Reads your **local VALORANT client** in real time and renders it as a slick web dashboard, a colour-coded terminal scoreboard, and your **Discord status** — plus **appear offline**, your **collection value**, **rank/RR history**, a **209-crosshair studio**, a **647-player sensitivity lab**, an instalock helper, a cross-session encounter log, and a VALORANT chat **ASCII art studio**.
 
 ### 🌐 [**valorantscout.com**](https://valorantscout.com)
 Try the live dashboard right now — it runs in **demo mode** with VALORANT closed, no install needed.
 
 [Features](#-features) · [Quick start](#-quick-start) · [Screens](#-screens) · [CLI](#-terminal-cli) · [Discord](#-discord-rich-presence) · [Config](#-configuration) · [Credits](#-credits)
 
-[VALORANT Lineups](https://valorantscout.com/valorant-lineups) · [VALORANT Rank Checker](https://valorantscout.com/valorant-rank-checker) · [Live Scoreboard](https://valorantscout.com) · [VALORANT Smurf Detector](https://valorantscout.com/valorant-smurf-detector) · [Appear Offline in VALORANT](https://valorantscout.com/valorant-offline-mode) · [VALORANT Crosshair Codes](https://valorantscout.com/valorant-crosshairs) · [VALORANT Sensitivity](https://valorantscout.com/valorant-sensitivity) · [VALORANT ASCII Art](https://valorantscout.com/ascii)
+[VALORANT Rank Checker](https://valorantscout.com/valorant-rank-checker) · [Live Scoreboard](https://valorantscout.com) · [VALORANT Smurf Detector](https://valorantscout.com/valorant-smurf-detector) · [Appear Offline in VALORANT](https://valorantscout.com/valorant-offline-mode) · [VALORANT Crosshair Codes](https://valorantscout.com/valorant-crosshairs) · [VALORANT Sensitivity](https://valorantscout.com/valorant-sensitivity) · [VALORANT ASCII Art](https://valorantscout.com/ascii)
 
 </div>
 
@@ -52,9 +52,6 @@ Launch VALORANT and show up **offline** to your friends — no third-party binar
 
 ### 🎯 Crosshair library
 **209 pro & community crosshairs** with pixel-accurate previews, nine selectable game scenes, movement/firing states, search, filters, favorites, comparison, and a full import-code builder. One click copies a code or share link, and community creations can be submitted for owner review.
-
-### 🗺️ Interactive lineup lab
-Browse attributed YouTube lineup guides on tactical maps with attack/defense, agent and ability filters. Scout shows where to stand and where utility lands, jumps to the saved video timestamp, keeps a private browser playbook, and accepts community submissions through a moderated map-marker flow.
 
 ### 🖱️ Pro sensitivity lab
 A searchable database of **647 VALORANT player sensitivities** with an eDPI percentile, closest-pro matcher, cm/360 calculation, sensitivity distribution, and physical-distance conversion between eight popular shooters.
