@@ -5,21 +5,21 @@ import platform
 import threading
 import time
 import uuid
-
-import requests
+from typing import Any
 
 import discord_presence
+import requests
 from riot_client import LocalAuth, _self_presence_private
 from vconstants import APP_VERSION
 
 _SYNC_URL = os.getenv("SCOUT_SYNC_URL", "https://valorantscout.com/api/sync")
 _INTERVAL = 60
-_worker: "_Worker | None" = None
+_worker: _Worker | None = None
 
 _LATEST = {"state": None, "name": None, "rank": None, "rankTier": None}
 
-def observe(board: dict) -> None:
-    pass
+
+def observe(board: dict[str, Any]) -> None:
     try:
         _LATEST["state"] = board.get("state")
         me = next((p for p in board.get("players", []) if p.get("isSelf")), None)
@@ -31,6 +31,7 @@ def observe(board: dict) -> None:
     except Exception:
         pass
 
+
 def maybe_start() -> None:
     global _worker
     if os.getenv("SCOUT_SYNC", "true").strip().lower() == "false":
@@ -40,8 +41,8 @@ def maybe_start() -> None:
     _worker = _Worker()
     _worker.start()
 
+
 def _install_id() -> str:
-    pass
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     path = os.path.join(data_dir, "client_id")
     try:
@@ -60,8 +61,9 @@ def _install_id() -> str:
         pass
     return cid
 
+
 class _Worker:
-    def __init__(self):
+    def __init__(self) -> None:
         self.install_id = _install_id()
         self.session_id = uuid.uuid4().hex
         self.started = time.time()
@@ -70,11 +72,11 @@ class _Worker:
         self.level: int | None = None
         self.os = f"{platform.system()} {platform.release()}"
 
-    def start(self):
+    def start(self) -> None:
         t = threading.Thread(target=self._run, name="ScoutSync", daemon=True)
         t.start()
 
-    def _fill_identity(self):
+    def _fill_identity(self) -> None:
 
         try:
             discord_presence.probe_discord_identity()
@@ -91,7 +93,8 @@ class _Worker:
             if not self.name and auth.puuid:
                 res = auth.pd_put("/name-service/v2/players", [auth.puuid])
                 if isinstance(res, list) and res:
-                    gn, tl = res[0].get("GameName"), res[0].get("TagLine")
+                    gn = res[0].get("GameName")
+                    tl = res[0].get("TagLine")
                     if gn:
                         self.name = f"{gn}#{tl}"
             if self.level is None:
@@ -102,7 +105,7 @@ class _Worker:
         except Exception:
             pass
 
-    def _run(self):
+    def _run(self) -> None:
         while True:
             try:
                 self._fill_identity()

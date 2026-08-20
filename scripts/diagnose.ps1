@@ -26,11 +26,13 @@ try {
     $mf = Get-RuntimeManifest
     DiagLine "channel: $($mf.app.channel), supported runtime: CPython $($mf.python.version) $($mf.python.arch), protocol: $($mf.protocol.version)"
     if ($mf.app.version -ne (Get-LocalVersion)) { Bad "runtime.json version ($($mf.app.version)) != VERSION ($(Get-LocalVersion))" }
-} catch { Bad "runtime.json: $($_.Exception.Message)" }
+}
+catch { Bad "runtime.json: $($_.Exception.Message)" }
 $relMf = Join-Path $Root "release-manifest.json"
 if (Test-Path $relMf) {
     try { DiagLine "release commit: $((Get-Content $relMf -Raw | ConvertFrom-Json).commit)" } catch { }
-} else { DiagLine "release commit: n/a (developer or pre-manifest tree)" }
+}
+else { DiagLine "release commit: n/a (developer or pre-manifest tree)" }
 
 
 RSection "Windows"
@@ -43,7 +45,8 @@ DiagLine "windows powershell: $($PSVersionTable.PSVersion)"
 $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
 if ($pwsh) {
     try { DiagLine "powershell 7: $((& pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null))" } catch { DiagLine "powershell 7: present" }
-} else { DiagLine "powershell 7: not installed (fine - not required)" }
+}
+else { DiagLine "powershell 7: not installed (fine - not required)" }
 
 
 RSection "Install path"
@@ -62,17 +65,20 @@ try {
     $t = Join-Path $Root (".vs-diag-" + [Guid]::NewGuid().ToString("N"))
     [System.IO.File]::WriteAllText($t, "x"); Remove-Item $t -Force
     Good "install folder writable"
-} catch { Bad "install folder NOT writable" }
+}
+catch { Bad "install folder NOT writable" }
 try {
     $t = Join-Path $env:TEMP (".vs-diag-" + [Guid]::NewGuid().ToString("N"))
     [System.IO.File]::WriteAllText($t, "x"); Remove-Item $t -Force
     Good "TEMP writable"
-} catch { Bad "TEMP NOT writable" }
+}
+catch { Bad "TEMP NOT writable" }
 try {
     $drive = (Get-Item $Root).PSDrive
     DiagLine ("free disk space: {0:N1} GB" -f ($drive.Free / 1GB))
     if ($drive.Free -lt 2GB) { Bad "less than 2 GB free" }
-} catch { }
+}
+catch { }
 
 
 RSection "Python"
@@ -81,16 +87,19 @@ try {
     if ($py) {
         $id = Get-PythonIdentity $py.Exe $py.Args
         Good "supported python found: $($id.executable) ($($id.version) $($id.machine) $($id.bits)-bit)"
-    } else {
+    }
+    else {
         Bad "no CPython $((Get-RuntimeManifest).python.version) x64 found on this PC (install.bat installs it)"
     }
-} catch { Bad "python discovery failed: $($_.Exception.Message)" }
+}
+catch { Bad "python discovery failed: $($_.Exception.Message)" }
 
 if (Test-Path $VenvPy) {
     $venv = Test-Venv
     if ($venv.Ok) { Good ".venv healthy (python, pip $(Get-VenvPipVersion), packages, imports)" }
     else { foreach ($r in $venv.Reasons) { Bad ".venv: $r" } }
-} else {
+}
+else {
     Bad ".venv missing - run install.bat"
 }
 
@@ -123,7 +132,8 @@ function Get-PortOwner([int]$port) {
                 if ($cmdLower -eq $rootLower -or $cmdLower.Contains($rootLower + '\')) { return "ours (Valorant Scout, PID $portPid)" }
             }
             return "foreign: $(Split-Path -Leaf ($exe + '')) (PID $portPid)"
-        } catch { return "unknown process (PID $portPid)" }
+        }
+        catch { return "unknown process (PID $portPid)" }
     }
     return "free"
 }
@@ -146,10 +156,12 @@ if (Test-Path $runtimeState) {
             $backendPort = [int]$rs.backendPort
             $wsPort = [int]$rs.wsPort
             DiagLine "active launcher selected backend=$backendPort, websocket=$wsPort"
-        } else {
+        }
+        else {
             DiagLine "runtime-state.json is stale (PID now belongs to another program)"
         }
-    } catch { DiagLine "runtime-state.json is stale (launcher is not running)" }
+    }
+    catch { DiagLine "runtime-state.json is stale (launcher is not running)" }
 }
 DiagLine "backend port $backendPort`: $(Get-PortOwner $backendPort)"
 DiagLine "websocket port $wsPort`: $(Get-PortOwner $wsPort)"
@@ -160,12 +172,15 @@ try {
     $h = Invoke-RestMethod -Uri "http://127.0.0.1:$backendPort/api/health" -TimeoutSec 3
     if ($h.service -ne "valorant-scout") {
         Bad "port $backendPort answered, but it is not Valorant Scout"
-    } elseif (-not $h.wsReady -or [int]$h.wsPort -ne $wsPort) {
+    }
+    elseif (-not $h.wsReady -or [int]$h.wsPort -ne $wsPort) {
         Bad "backend is up but its authenticated WebSocket self-check is not ready"
-    } else {
+    }
+    else {
         Good "backend + authenticated WebSocket healthy (v$($h.appVersion), protocol $($h.protocol), ws $($h.wsPort), client: $($h.clientStatus))"
     }
-} catch { DiagLine "backend: not running (start it with start.bat)" }
+}
+catch { DiagLine "backend: not running (start it with start.bat)" }
 
 
 RSection "Riot & Discord"
@@ -174,11 +189,13 @@ if (Test-Path $lockfile) {
     try {
         $null = [System.IO.File]::ReadAllText($lockfile)
         Good "Riot lockfile present and readable (Riot Client is running)"
-    } catch {
+    }
+    catch {
 
         Bad "VS-RIOT-001 Riot lockfile exists but can't be read - try restarting the Riot Client"
     }
-} else {
+}
+else {
     DiagLine "Riot lockfile: not found (VALORANT/Riot Client not running - live data needs the game open)"
 }
 $discord = $false
@@ -195,12 +212,14 @@ if (Test-Path $EnvFile) {
 try {
     $r = Invoke-WebRequest -Uri $frontend -UseBasicParsing -TimeoutSec 8 -Method Head
     Good "hosted dashboard reachable ($frontend)"
-} catch { Bad "hosted dashboard NOT reachable ($frontend): $($_.Exception.Message)" }
+}
+catch { Bad "hosted dashboard NOT reachable ($frontend): $($_.Exception.Message)" }
 try {
     $null = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
         -Headers @{ "User-Agent" = "valorant-scout" } -TimeoutSec 8
     Good "update endpoint reachable"
-} catch { DiagLine "update endpoint: not reachable (updates would be skipped)" }
+}
+catch { DiagLine "update endpoint: not reachable (updates would be skipped)" }
 
 
 RSection "Recent errors (sanitized)"
@@ -221,7 +240,7 @@ if ($Bundle) {
     $dest = $BundlePath
     if (-not $dest) {
         $dest = Join-Path ([Environment]::GetFolderPath("Desktop")) `
-            ("valorant-scout-support-" + [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss") + ".zip")
+        ("valorant-scout-support-" + [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss") + ".zip")
     }
     $work = Join-Path $env:TEMP ("vs-bundle-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -249,7 +268,8 @@ if ($Bundle) {
         if (Test-Path $dest) { Remove-Item -Force $dest }
         Compress-Archive -Path (Join-Path $work "*") -DestinationPath $dest
         Good "support bundle written: $dest"
-    } finally {
+    }
+    finally {
         Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     }
 }

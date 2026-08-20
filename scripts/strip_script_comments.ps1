@@ -10,7 +10,7 @@ $changed = 0
 $checked = 0
 
 foreach ($file in (Get-ChildItem -LiteralPath $Root -Recurse -File |
-        Where-Object { $_.Extension -eq ".ps1" })) {
+            Where-Object { $_.Extension -eq ".ps1" })) {
     $text = [System.IO.File]::ReadAllText($file.FullName)
     $tokens = $null
     $errors = $null
@@ -21,8 +21,8 @@ foreach ($file in (Get-ChildItem -LiteralPath $Root -Recurse -File |
         throw "PowerShell parse failed before comment stripping: $($file.FullName)"
     }
     $comments = @($tokens | Where-Object {
-        $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment
-    } | Sort-Object { $_.Extent.StartOffset } -Descending)
+            $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment
+        } | Sort-Object { $_.Extent.StartOffset } -Descending)
     if ($Check -and $comments.Count -gt 0) {
         throw "PowerShell comments remain: $($file.FullName)"
     }
@@ -41,7 +41,7 @@ foreach ($file in (Get-ChildItem -LiteralPath $Root -Recurse -File |
 }
 
 foreach ($file in (Get-ChildItem -LiteralPath $Root -Recurse -File |
-        Where-Object { $_.Extension -eq ".bat" })) {
+            Where-Object { $_.Extension -eq ".bat" })) {
     $text = [System.IO.File]::ReadAllText($file.FullName)
     $lines = @($text -split "\r?\n")
     $commentLines = @($lines | Where-Object { $_ -match '^\s*(?i:rem(?:\s|$)|::)' })
@@ -59,6 +59,7 @@ foreach ($file in (Get-ChildItem -LiteralPath $Root -Recurse -File |
 
 if ($Check) {
     Write-Host "verified $checked PowerShell/batch files contain no comments"
-} else {
+}
+else {
     Write-Host "stripped comments from $changed of $checked PowerShell/batch files"
 }

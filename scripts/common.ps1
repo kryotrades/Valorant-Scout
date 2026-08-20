@@ -3,26 +3,26 @@ $ProgressPreference = "SilentlyContinue"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$Root     = Split-Path -Parent $PSScriptRoot
-$Repo     = "kryotrades/valorant-scout"
-$VenvDir  = Join-Path $Root ".venv"
-$VenvPy   = Join-Path $VenvDir "Scripts\python.exe"
+$Root = Split-Path -Parent $PSScriptRoot
+$Repo = "kryotrades/valorant-scout"
+$VenvDir = Join-Path $Root ".venv"
+$VenvPy = Join-Path $VenvDir "Scripts\python.exe"
 $ScoutDir = Join-Path $Root ".scout"
-$EnvFile  = Join-Path $Root "backend\.env"
+$EnvFile = Join-Path $Root "backend\.env"
 
-$HasFrontend = Test-Path (Join-Path $Root "frontend\package.json")
+$Script:HasFrontend = Test-Path (Join-Path $Root "frontend\package.json")
 
 $MarkerSchemaVersion = 2
 
 function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
-function Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
+function Ok($m) { Write-Host "  + $m" -ForegroundColor Green }
 function Note($m) { Write-Host "  . $m" -ForegroundColor DarkGray }
-function Warn2($m){ Write-Host "  ! $m" -ForegroundColor Yellow }
+function Warn2($m) { Write-Host "  ! $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  x $m" -ForegroundColor Red }
 
-function Has-Cmd($name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
+function Test-Cmd($name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 
-function Refresh-Path {
+function Update-Path {
     $m = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $u = [Environment]::GetEnvironmentVariable("Path", "User")
     $env:Path = (@($m, $u) | Where-Object { $_ }) -join ";"
@@ -84,7 +84,8 @@ function Compare-ScoutVersion([string]$a, [string]$b) {
         if ($aNum -and $bNum) {
             if ($ia -lt $ib) { return -1 }
             if ($ia -gt $ib) { return 1 }
-        } else {
+        }
+        else {
             $c = [string]::CompareOrdinal($sa[$i], $sb[$i])
             if ($c -lt 0) { return -1 }
             if ($c -gt 0) { return 1 }
@@ -103,14 +104,14 @@ function HashOf($rel) {
 
 
 $Script:RedactionRules = @(
-    @{ Pattern = '([?&](?:s|t|token|key)=)[^&\s"'']+';                                              Replace = '$1[REDACTED]' },
-    @{ Pattern = '\b([st]=)[A-Za-z0-9._~-]{8,}';                                                    Replace = '$1[REDACTED]' },
-    @{ Pattern = '("(?:token|password|apiKey|api_key|key|secret|authorization)"\s*:\s*")[^"]+(")';  Replace = '$1[REDACTED]$2' },
-    @{ Pattern = '\b(Basic|Bearer)\s+[A-Za-z0-9+/=_\-.]{8,}';                                       Replace = '$1 [REDACTED]' },
-    @{ Pattern = '\b(password|token|secret|api_key|apikey|authorization)\s*[=:]\s*\S+';             Replace = '$1=[REDACTED]' },
-    @{ Pattern = '\b[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}:[A-Za-z0-9_\-]{16,}\b';                  Replace = '[REDACTED-ABLY-KEY]' },
-    @{ Pattern = '\b([0-9a-fA-F]{8})[0-9a-fA-F\-]{24,}\b';                                          Replace = '$1...[REDACTED]' },
-    @{ Pattern = '\b(\d{6})\d{11,}\b';                                                              Replace = '$1...[REDACTED]' }
+    @{ Pattern = '([?&](?:s|t|token|key)=)[^&\s"'']+'; Replace = '$1[REDACTED]' },
+    @{ Pattern = '\b([st]=)[A-Za-z0-9._~-]{8,}'; Replace = '$1[REDACTED]' },
+    @{ Pattern = '("(?:token|password|apiKey|api_key|key|secret|authorization)"\s*:\s*")[^"]+(")'; Replace = '$1[REDACTED]$2' },
+    @{ Pattern = '\b(Basic|Bearer)\s+[A-Za-z0-9+/=_\-.]{8,}'; Replace = '$1 [REDACTED]' },
+    @{ Pattern = '\b(password|token|secret|api_key|apikey|authorization)\s*[=:]\s*\S+'; Replace = '$1=[REDACTED]' },
+    @{ Pattern = '\b[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}:[A-Za-z0-9_\-]{16,}\b'; Replace = '[REDACTED-ABLY-KEY]' },
+    @{ Pattern = '\b([0-9a-fA-F]{8})[0-9a-fA-F\-]{24,}\b'; Replace = '$1...[REDACTED]' },
+    @{ Pattern = '\b(\d{6})\d{11,}\b'; Replace = '$1...[REDACTED]' }
 )
 
 function Protect-ScoutText([string]$text) {
@@ -121,7 +122,7 @@ function Protect-ScoutText([string]$text) {
 }
 
 $Script:LogMaxBytes = 2MB
-$Script:LogBackups  = 5
+$Script:LogBackups = 5
 
 function Write-ScoutLog {
     param([string]$Log, [string]$Level = "INFO", [string]$Code = "", [string]$Message)
@@ -140,7 +141,8 @@ function Write-ScoutLog {
         if ($Code) { $codePart = "$Code " }
         $line = "$ts [$Log] $Level $codePart$(Protect-ScoutText $Message)"
         [System.IO.File]::AppendAllText($file, $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
-    } catch { }
+    }
+    catch { }
 }
 
 
@@ -151,7 +153,8 @@ function Show-FatalDialog([string]$message, [string]$logName) {
         [System.Windows.Forms.MessageBox]::Show($full, "Valorant Scout",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-    } catch {
+    }
+    catch {
         Fail $full
     }
 }
@@ -166,7 +169,8 @@ function New-ScoutLock([string]$name) {
     try {
         return [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate,
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-    } catch {
+    }
+    catch {
         throw "Another Valorant Scout $name operation is already running. Wait for it to finish and try again."
     }
 }
@@ -185,7 +189,8 @@ function New-ScoutMutex([string]$purpose, [string]$busyMessage) {
     $acquired = $false
     try {
         $acquired = $mutex.WaitOne(0)
-    } catch [System.Threading.AbandonedMutexException] {
+    }
+    catch [System.Threading.AbandonedMutexException] {
         $acquired = $true
     }
     if (-not $acquired) {
@@ -250,7 +255,8 @@ function Stop-RunningApp([string]$LogName = "launcher") {
         if (Get-CimInstance Win32_Process -Filter "ProcessId=$appPid" -ErrorAction SilentlyContinue) {
             & taskkill /PID $appPid /T /F 2>&1 | Out-Null
         }
-    } finally { $ErrorActionPreference = $prevEap }
+    }
+    finally { $ErrorActionPreference = $prevEap }
 
 
 
@@ -292,7 +298,8 @@ function Test-Preflight {
             $t = Join-Path $dir (".vs-write-test-" + [Guid]::NewGuid().ToString("N"))
             [System.IO.File]::WriteAllText($t, "x")
             Remove-Item $t -Force
-        } catch {
+        }
+        catch {
             $problems += "The folder '$dir' is not writable. Move Valorant Scout to a folder you can write to (e.g. Documents)."
         }
     }
@@ -302,7 +309,8 @@ function Test-Preflight {
         if ($drive -and $null -ne $drive.Free -and $drive.Free -lt 2GB) {
             $problems += "Less than 2 GB free on drive $($drive.Name): — free up space and retry."
         }
-    } catch { }
+    }
+    catch { }
 
     return $problems
 }
@@ -327,24 +335,25 @@ function Get-PythonIdentity([string]$exe, [string[]]$exeArgs) {
         finally { $ErrorActionPreference = $prevEAP }
         if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
         return (($out | Select-Object -Last 1) | ConvertFrom-Json)
-    } catch { return $null }
+    }
+    catch { return $null }
 }
 
 function Test-PythonExact($identity, $manifest) {
     if (-not $identity) { return $false }
     return ($identity.implementation -eq $manifest.python.implementation) -and
-           ($identity.version -eq $manifest.python.version) -and
-           ($identity.bits -eq $manifest.python.bits) -and
-           ($identity.machine -eq "AMD64")
+    ($identity.version -eq $manifest.python.version) -and
+    ($identity.bits -eq $manifest.python.bits) -and
+    ($identity.machine -eq "AMD64")
 }
 
 function Get-PythonCandidates {
     $cands = @()
     $mf = Get-RuntimeManifest
     $mm = ($mf.python.version -split '\.')[0..1] -join '.'
-    if (Has-Cmd "py")      { $cands += @{ Exe = "py"; Args = @("-$mm") } }
-    if (Has-Cmd "python")  { $cands += @{ Exe = "python";  Args = @() } }
-    if (Has-Cmd "python3") { $cands += @{ Exe = "python3"; Args = @() } }
+    if (Test-Cmd "py") { $cands += @{ Exe = "py"; Args = @("-$mm") } }
+    if (Test-Cmd "python") { $cands += @{ Exe = "python"; Args = @() } }
+    if (Test-Cmd "python3") { $cands += @{ Exe = "python3"; Args = @() } }
     $regRoots = @(
         "HKCU:\Software\Python\PythonCore\$mm\InstallPath",
         "HKLM:\Software\Python\PythonCore\$mm\InstallPath",
@@ -357,7 +366,8 @@ function Get-PythonCandidates {
                 $exe = Join-Path $ip "python.exe"
                 if (Test-Path $exe) { $cands += @{ Exe = $exe; Args = @() } }
             }
-        } catch { }
+        }
+        catch { }
     }
     $default = Join-Path $env:LocalAppData ("Programs\Python\Python" + ($mm -replace '\.', '') + "\python.exe")
     if (Test-Path $default) { $cands += @{ Exe = $default; Args = @() } }
@@ -374,7 +384,8 @@ function Find-ExactPython {
         }
         if ($id) {
             Write-ScoutLog -Log install -Level WARN -Message "rejected python candidate $($c.Exe): $($id.implementation) $($id.version) $($id.machine) $($id.bits)-bit"
-        } else {
+        }
+        else {
             Write-ScoutLog -Log install -Level WARN -Message "rejected python candidate $($c.Exe): does not run (Store alias or broken launcher)"
         }
     }
@@ -403,13 +414,14 @@ function Install-ExactPython {
         $p = Start-Process -FilePath $tmp -Wait -PassThru -ArgumentList `
             "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_launcher=1"
         if ($p.ExitCode -ne 0) { throw "Python installer failed (exit code $($p.ExitCode))." }
-    } finally {
+    }
+    finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
-    Refresh-Path
+    Update-Path
 }
 
-function Ensure-ExactPython {
+function Initialize-ExactPython {
     $mf = Get-RuntimeManifest
     $py = Find-ExactPython
     if (-not $py) {
@@ -447,7 +459,8 @@ function Get-VenvPipVersion {
         finally { $ErrorActionPreference = $prevEAP }
         if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
         if ($out -match 'pip\s+(\S+)') { return $Matches[1] }
-    } catch { }
+    }
+    catch { }
     return $null
 }
 
@@ -469,7 +482,8 @@ function Test-Venv([switch]$Quick) {
     $cfgPath = Join-Path $VenvDir "pyvenv.cfg"
     if (-not (Test-Path $cfgPath)) {
         $reasons += "venv has no pyvenv.cfg (incomplete or corrupt environment)"
-    } else {
+    }
+    else {
         try {
             $cfg = Get-Content $cfgPath -Raw -Encoding UTF8
             if ($cfg -match '(?im)^command\s*=\s*(.+)$') {
@@ -488,7 +502,8 @@ function Test-Venv([switch]$Quick) {
                     }
                 }
             }
-        } catch {
+        }
+        catch {
             $reasons += "pyvenv.cfg is unreadable"
         }
     }
@@ -497,10 +512,11 @@ function Test-Venv([switch]$Quick) {
         try {
             $installedMarker = Get-Content $installedFile -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($installedMarker.pathFingerprint -and
-                    $installedMarker.pathFingerprint -ne (Get-PathFingerprint)) {
+                $installedMarker.pathFingerprint -ne (Get-PathFingerprint)) {
                 $reasons += "installation folder moved since the venv was created"
             }
-        } catch { }
+        }
+        catch { }
     }
 
     if ($Quick) {
@@ -518,7 +534,8 @@ function Test-Venv([switch]$Quick) {
     $id = Get-PythonIdentity $VenvPy @()
     if (-not $id) {
         $reasons += "venv python does not run (moved or corrupt venv)"
-    } else {
+    }
+    else {
         if (-not (Test-PythonExact $id $mf)) {
             $reasons += "venv python is $($id.implementation) $($id.version) $($id.machine) $($id.bits)-bit, need CPython $($mf.python.version) x64"
         }
@@ -560,7 +577,8 @@ function Test-Venv([switch]$Quick) {
 
         & $VenvPy (Join-Path $PSScriptRoot "import_smoke.py") 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { $reasons += "required packages fail to import" }
-    } finally { $ErrorActionPreference = $prevEap }
+    }
+    finally { $ErrorActionPreference = $prevEap }
 
     return @{ Ok = ($reasons.Count -eq 0); Reasons = $reasons }
 }
@@ -571,10 +589,12 @@ function Repair-Venv($py) {
         Step "Rebuilding the Python environment (.venv) ..."
         try {
             Remove-Item -Recurse -Force $resolved
-        } catch {
+        }
+        catch {
             throw "Couldn't remove the old .venv ($($_.Exception.Message)). Close any running Valorant Scout windows (and any antivirus quarantine on that folder), then run install.bat again."
         }
-    } else {
+    }
+    else {
         Step "Creating the Python environment (.venv) ..."
     }
     & $py.Exe @($py.Args + @("-m", "venv", $resolved))
@@ -630,14 +650,14 @@ function Save-Markers($region) {
     $mf = Get-RuntimeManifest
     if (-not (Test-Path $ScoutDir)) { New-Item -ItemType Directory -Path $ScoutDir | Out-Null }
     $installed = @{
-        schemaVersion   = $MarkerSchemaVersion
-        version         = (Get-LocalVersion)
-        region          = $region
-        python          = @{ version = $mf.python.version; arch = $mf.python.arch }
-        pip             = $mf.pip.version
+        schemaVersion    = $MarkerSchemaVersion
+        version          = (Get-LocalVersion)
+        region           = $region
+        python           = @{ version = $mf.python.version; arch = $mf.python.arch }
+        pip              = $mf.pip.version
         requirementsHash = (HashOf "backend\requirements.txt")
-        pathFingerprint = (Get-PathFingerprint)
-        installedAt     = [DateTime]::UtcNow.ToString("o")
+        pathFingerprint  = (Get-PathFingerprint)
+        installedAt      = [DateTime]::UtcNow.ToString("o")
     } | ConvertTo-Json
     Write-FileNoBom (Join-Path $ScoutDir "installed.json") $installed
     Save-DepHashes
@@ -663,7 +683,7 @@ function Test-Markers {
     return @{ Ok = $true; Marker = $m }
 }
 
-function Is-Installed {
+function Test-Installed {
     return ((Test-Markers).Ok -and (Test-Path $VenvPy))
 }
 
@@ -702,41 +722,44 @@ function New-DesktopShortcut {
         $sc.Description = "Launch Valorant Scout"
         $sc.Save()
         Ok "Desktop shortcut created - you can drag it onto your taskbar to pin it."
-    } catch { Warn2 "Couldn't create the desktop shortcut ($($_.Exception.Message))." }
+    }
+    catch { Warn2 "Couldn't create the desktop shortcut ($($_.Exception.Message))." }
 }
 
 
 
 
 function Find-Node {
-    if (Has-Cmd "node") {
+    if (Test-Cmd "node") {
         try {
             $v = (& node -v) -replace '^v', ''
             if ([version]$v -ge [version]"18.17.0") { return $true }
-        } catch {}
+        }
+        catch {}
     }
     return $false
 }
 
-function Run-Npm([string[]]$npmArgs) {
+function Invoke-Npm([string[]]$npmArgs) {
     Push-Location (Join-Path $Root "frontend")
     try {
         cmd /c ("npm " + ($npmArgs -join " ") + " 2>&1") | Out-Host
         return $LASTEXITCODE
-    } finally { Pop-Location }
+    }
+    finally { Pop-Location }
 }
 
 function Install-NodeDeps {
     Step "Installing frontend packages (npm ci) ..."
-    if ((Run-Npm @("ci", "--no-fund", "--no-audit")) -ne 0) {
+    if ((Invoke-Npm @("ci", "--no-fund", "--no-audit")) -ne 0) {
         throw "npm ci failed (check your internet connection and Node version, then retry)."
     }
     Ok "Frontend packages installed."
 }
 
-function Build-Frontend {
+function Invoke-FrontendBuild {
     Step "Building the website (npm run build) ... (first build can take a minute)"
-    if ((Run-Npm @("run", "build")) -ne 0) { throw "npm run build failed" }
+    if ((Invoke-Npm @("run", "build")) -ne 0) { throw "npm run build failed" }
     Ok "Website built."
 }
 
@@ -747,7 +770,8 @@ function Get-LatestRelease([int]$timeoutSec = 8) {
     try {
         return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
             -Headers @{ "User-Agent" = "valorant-scout" } -TimeoutSec $timeoutSec
-    } catch { return $null }
+    }
+    catch { return $null }
 }
 
 function Test-UpdateAvailable {
@@ -755,6 +779,7 @@ function Test-UpdateAvailable {
     if (-not $rel -or -not $rel.tag_name) { return $null }
     try {
         if ((Compare-ScoutVersion $rel.tag_name (Get-LocalVersion)) -gt 0) { return $rel.tag_name }
-    } catch { }
+    }
+    catch { }
     return $null
 }

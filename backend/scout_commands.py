@@ -3,6 +3,10 @@ from __future__ import annotations
 import collections
 import threading
 import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from agents import resolve_agent
 
@@ -26,11 +30,30 @@ ALLOWED_COMMANDS = {
 }
 
 ACK_FIELDS = (
-    "remoteUrl", "remoteSessionId", "side", "map", "status", "agent",
-    "configured", "perMap", "rateLimited", "dedup",
-    "queue", "queueId", "inQueue",
-    "running", "active", "enabled", "connected", "friendsLoaded",
-    "session", "sessions", "sessionId", "meta", "matchId", "deprecated",
+    "remoteUrl",
+    "remoteSessionId",
+    "side",
+    "map",
+    "status",
+    "agent",
+    "configured",
+    "perMap",
+    "rateLimited",
+    "dedup",
+    "queue",
+    "queueId",
+    "inQueue",
+    "running",
+    "active",
+    "enabled",
+    "connected",
+    "friendsLoaded",
+    "session",
+    "sessions",
+    "sessionId",
+    "meta",
+    "matchId",
+    "deprecated",
 )
 
 RATE_LIMIT = 5
@@ -39,11 +62,16 @@ RATE_WINDOW = 10.0
 DEDUP_TTL = 120.0
 DEDUP_MAX = 256
 
-class CommandRouter:
-    pass
 
-    def __init__(self, *, instalock_worker, riot_client, board_provider,
-                 remote_controller=None):
+class CommandRouter:
+    def __init__(
+        self,
+        *,
+        instalock_worker: Any,
+        riot_client: Any,
+        board_provider: Callable[[], dict[str, Any]],
+        remote_controller: Any = None,
+    ) -> None:
         self.instalock_worker = instalock_worker
         self.riot_client = riot_client
 
@@ -52,9 +80,13 @@ class CommandRouter:
 
         self._lock = threading.Lock()
 
-        self._calls: dict[str, collections.deque] = collections.defaultdict(collections.deque)
+        self._calls: dict[str, collections.deque[float]] = collections.defaultdict(
+            collections.deque
+        )
 
-        self._seen: dict[str, "collections.OrderedDict[str, float]"] =            collections.defaultdict(collections.OrderedDict)
+        self._seen: dict[str, collections.OrderedDict[str, float]] = collections.defaultdict(
+            collections.OrderedDict
+        )
 
     def _rate_ok(self, client_id: str) -> bool:
         now = time.time()
@@ -66,7 +98,7 @@ class CommandRouter:
         dq.append(now)
         return True
 
-    def _is_duplicate(self, client_id: str, command_id) -> bool:
+    def _is_duplicate(self, client_id: str, command_id: str | None) -> bool:
         if not command_id:
             return False
         now = time.time()
@@ -81,20 +113,27 @@ class CommandRouter:
             seen.popitem(last=False)
         return False
 
-    def execute(self, *, client_id: str, command: str, payload: dict | None,
-                command_id=None) -> dict:
-        pass
+    def execute(
+        self,
+        *,
+        client_id: str,
+        command: str,
+        payload: dict[str, Any] | None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
         payload = payload if isinstance(payload, dict) else {}
 
         with self._lock:
             if command not in ALLOWED_COMMANDS:
                 return {"ok": False, "message": f"Unknown command '{command}'."}
             if self._is_duplicate(client_id, command_id):
-                return {"ok": False, "dedup": True,
-                        "message": "Duplicate command ignored."}
+                return {"ok": False, "dedup": True, "message": "Duplicate command ignored."}
             if not self._rate_ok(client_id):
-                return {"ok": False, "rateLimited": True,
-                        "message": "Rate limit exceeded — max 5 commands / 10s."}
+                return {
+                    "ok": False,
+                    "rateLimited": True,
+                    "message": "Rate limit exceeded — max 5 commands / 10s.",
+                }
 
         try:
             if command == "instalock":
@@ -133,8 +172,7 @@ class CommandRouter:
             return {"ok": False, "message": f"Command failed: {e}"}
         return {"ok": False, "message": f"Unhandled command '{command}'."}
 
-    def _instalock(self, payload: dict) -> dict:
-        pass
+    def _instalock(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = (payload.get("action") or "start").lower()
         if action == "stop":
             self.instalock_worker.stop()
@@ -154,70 +192,84 @@ class CommandRouter:
         per_map = payload.get("perMap") if isinstance(payload.get("perMap"), dict) else None
 
         if action == "once":
-            r = self.riot_client.instalock(agent, mode=mode, dry_run=dry_run,
-                                           region=region)
+            r = self.riot_client.instalock(agent, mode=mode, dry_run=dry_run, region=region)
             return {**r, "ok": bool(r.get("ok"))}
 
         if dry_run:
             for mapn, name in (per_map or {}).items():
                 if not resolve_agent(name):
-                    return {"ok": False,
-                            "message": f"Unknown agent '{name}' for map '{mapn}'."}
-            return {"ok": True, "status": "dry-run", "agent": ag["name"],
-                    "perMap": per_map or {},
-                    "message": f"DRY-RUN: would {mode} {ag['name']} when agent "
-                               f"select starts. Turn dry-run OFF to auto-lock."}
-        r = self.instalock_worker.start(agent, mode=mode, delay=delay,
-                                        region=region, per_map=per_map)
-        msg = r.get("message") or ("Armed — waiting for agent select…"
-                                   if r.get("ok") else "Couldn't start.")
+                    return {"ok": False, "message": f"Unknown agent '{name}' for map '{mapn}'."}
+            return {
+                "ok": True,
+                "status": "dry-run",
+                "agent": ag["name"],
+                "perMap": per_map or {},
+                "message": f"DRY-RUN: would {mode} {ag['name']} when agent "
+                f"select starts. Turn dry-run OFF to auto-lock.",
+            }
+        r = self.instalock_worker.start(
+            agent, mode=mode, delay=delay, region=region, per_map=per_map
+        )
+        msg = r.get("message") or (
+            "Armed — waiting for agent select…" if r.get("ok") else "Couldn't start."
+        )
         return {**r, "ok": bool(r.get("ok")), "message": msg}
 
-    def _dodge(self, payload: dict) -> dict:
+    def _dodge(self, payload: dict[str, Any]) -> dict[str, Any]:
         dry_run = bool(payload.get("dryRun", True))
         region = payload.get("region")
         r = self.riot_client.dodge(dry_run=dry_run, region=region)
         return {**r, "ok": bool(r.get("ok"))}
 
-    def _set_queue(self, payload: dict) -> dict:
-        pass
+    def _set_queue(self, payload: dict[str, Any]) -> dict[str, Any]:
         qid = (payload.get("queueId") or "").strip().lower()
         if not qid:
             return {"ok": False, "message": "Field 'queueId' is required."}
-        r = self.riot_client.set_queue(qid, dry_run=bool(payload.get("dryRun", True)),
-                                       region=payload.get("region"))
+        r = self.riot_client.set_queue(
+            qid, dry_run=bool(payload.get("dryRun", True)), region=payload.get("region")
+        )
 
-        return {**r, "ok": bool(r.get("ok")),
-                "queue": self.riot_client.party_state(payload.get("region"))}
+        return {
+            **r,
+            "ok": bool(r.get("ok")),
+            "queue": self.riot_client.party_state(payload.get("region")),
+        }
 
-    def _queue_action(self, action: str, payload: dict) -> dict:
-        pass
+    def _queue_action(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         fn = getattr(self.riot_client, action)
-        r = fn(dry_run=bool(payload.get("dryRun", True)),
-               region=payload.get("region"))
-        return {**r, "ok": bool(r.get("ok")),
-                "queue": self.riot_client.party_state(payload.get("region"))}
+        r = fn(dry_run=bool(payload.get("dryRun", True)), region=payload.get("region"))
+        return {
+            **r,
+            "ok": bool(r.get("ok")),
+            "queue": self.riot_client.party_state(payload.get("region")),
+        }
 
-    def _check_side(self, _payload: dict) -> dict:
+    def _check_side(self, _payload: dict[str, Any]) -> dict[str, Any]:
         board = self.board_provider() or {}
         side = board.get("side")
         mapn = board.get("map")
         if side:
-            return {"ok": True, "side": side, "map": mapn,
-                    "message": f"You are {side}" + (f" on {mapn}" if mapn else "") + "."}
-        return {"ok": True, "side": None, "map": mapn,
-                "message": "Not in agent select / a match."}
+            return {
+                "ok": True,
+                "side": side,
+                "map": mapn,
+                "message": f"You are {side}" + (f" on {mapn}" if mapn else "") + ".",
+            }
+        return {"ok": True, "side": None, "map": mapn, "message": "Not in agent select / a match."}
 
-    def _launch_offline(self, payload: dict) -> dict:
+    def _launch_offline(self, payload: dict[str, Any]) -> dict[str, Any]:
         import offline_launch
+
         return offline_launch.launch(payload.get("status"))
 
-    def _offline_status(self, _payload: dict) -> dict:
+    def _offline_status(self, _payload: dict[str, Any]) -> dict[str, Any]:
         import offline_launch
+
         return {"ok": True, **offline_launch.status()}
 
-    def _offline_toggle(self, payload: dict) -> dict:
+    def _offline_toggle(self, payload: dict[str, Any]) -> dict[str, Any]:
         import offline_launch
+
         if "status" in payload:
             return offline_launch.set_status(str(payload.get("status")))
         return offline_launch.set_enabled(bool(payload.get("enabled", True)))
@@ -225,37 +277,45 @@ class CommandRouter:
     def _owner(self) -> str | None:
         return (self.board_provider() or {}).get("selfPuuid")
 
-    def _reset_session(self, payload: dict) -> dict:
+    def _reset_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         import session_tracker
+
         return session_tracker.reset(self._owner(), payload.get("goal"))
 
-    def _start_session(self, payload: dict) -> dict:
+    def _start_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         import history
         import session_tracker
+
         owner = self._owner()
         baseline = history.payload(owner).get("summary", {}) if owner else None
         return session_tracker.start(owner, payload.get("goal"), baseline)
 
-    def _end_session(self, _payload: dict) -> dict:
+    def _end_session(self, _payload: dict[str, Any]) -> dict[str, Any]:
         import session_tracker
+
         return session_tracker.end(self._owner())
 
-    def _delete_session(self, payload: dict) -> dict:
+    def _delete_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         import session_tracker
+
         return session_tracker.delete(self._owner(), str(payload.get("sessionId") or "").strip())
 
-    def _update_match_meta(self, payload: dict) -> dict:
+    def _update_match_meta(self, payload: dict[str, Any]) -> dict[str, Any]:
         import match_meta
+
         return match_meta.update(self._owner(), str(payload.get("matchId") or "").strip(), payload)
 
-    def _enable_remote(self, _payload: dict) -> dict:
+    def _enable_remote(self, _payload: dict[str, Any]) -> dict[str, Any]:
         if self.remote_controller is None:
-            return {"ok": False, "configured": False,
-                    "message": "Remote mode is not configured. Set ABLY_API_KEY "
-                               "in the frontend/Vercel environment."}
+            return {
+                "ok": False,
+                "configured": False,
+                "message": "Remote mode is not configured. Set ABLY_API_KEY "
+                "in the frontend/Vercel environment.",
+            }
         return self.remote_controller.enable()
 
-    def _disable_remote(self, _payload: dict) -> dict:
+    def _disable_remote(self, _payload: dict[str, Any]) -> dict[str, Any]:
         if self.remote_controller is None:
             return {"ok": True, "message": "Remote mode was not active."}
         return self.remote_controller.disable()

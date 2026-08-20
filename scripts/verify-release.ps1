@@ -27,28 +27,29 @@ try {
     Step "Forbidden-content scan ..."
 
     $forbidden = @('(^|/)\.env$', '\.env\.local', '(^|/)frontend/', '(^|/)node_modules/',
-                   '(^|/)__pycache__/', '\.pyc$', '(^|/)\.venv/', '(^|/)\.scout/',
-                   '(^|/)backend/data/', '(^|/)\.next/', '(^|/)\.git/', '(^|/)ops/',
-                   '(^|/)vendor/', '(^|/)tests/', '(^|/)\.github/', '(^|/)\.claude/', 'client_id$')
+        '(^|/)__pycache__/', '\.pyc$', '(^|/)\.venv/', '(^|/)\.scout/',
+        '(^|/)backend/data/', '(^|/)\.next/', '(^|/)\.git/', '(^|/)ops/',
+        '(^|/)vendor/', '(^|/)tests/', '(^|/)\.github/', '(^|/)\.claude/', 'client_id$')
     $bad = @()
     foreach ($file in (Get-ChildItem -Path $tree -Recurse -File)) {
         $rel = $file.FullName.Substring($tree.Length + 1) -replace '\\', '/'
         foreach ($fp in $forbidden) { if ($rel -match $fp) { $bad += "$rel ($fp)" } }
-        if ($file.Extension -in @(".py", ".ps1", ".bat", ".md", ".json", ".txt", ".example")) {
-            $content = Get-Content $file.FullName -Raw -Encoding UTF8
-            if ($content -match ('VS-CANARY' + '-SECRET')) { $bad += "$rel (canary secret leaked!)" }
-            if ($content -match '[A-Za-z]:\\Users\\(?!Public)[A-Za-z0-9._ -]+\\') { $bad += "$rel (developer absolute path)" }
-        }
     }
     if ($bad.Count -gt 0) { foreach ($b in $bad) { Fail $b }; exit 1 }
+    # The same scanner build-release.ps1 runs over the staged tree, so the
+    # artifact is checked against one definition of "secret" rather than the
+    # abridged copy this file used to carry.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+    (Join-Path $PSScriptRoot "scan-secrets.ps1") -Path $tree
+    if ($LASTEXITCODE -ne 0) { Fail "the artifact contains a secret."; exit 1 }
     Ok "no forbidden files, secrets or personal paths."
 
     Step "Required files + encodings ..."
     foreach ($req in @("install.bat", "start.bat", "UPDATE.bat", "VERSION",
-                       "runtime.json", "run.py", "cli.py", "backend/requirements.txt",
-                       "backend/app.py", "scripts/common.ps1", "scripts/install.ps1",
-                       "scripts/start.ps1", "scripts/update.ps1", "scripts/diagnose.ps1",
-                       "scripts/import_smoke.py")) {
+            "runtime.json", "run.py", "cli.py", "backend/requirements.txt",
+            "backend/app.py", "scripts/common.ps1", "scripts/install.ps1",
+            "scripts/start.ps1", "scripts/update.ps1", "scripts/diagnose.ps1",
+            "scripts/import_smoke.py")) {
         if (-not (Test-Path (Join-Path $tree ($req -replace '/', '\')))) { Fail "required file missing: $req"; exit 1 }
     }
     foreach ($file in (Get-ChildItem -Path $tree -Recurse -File -Include *.ps1, *.bat)) {
@@ -68,14 +69,16 @@ try {
         & $VenvPy (Join-Path $PSScriptRoot "strip_comments.py") --check $tree
         if ($LASTEXITCODE -ne 0) { Fail "Python comments/docstrings remain in the public artifact."; exit 1 }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            (Join-Path $PSScriptRoot "strip_script_comments.ps1") -Root $tree -Check
+        (Join-Path $PSScriptRoot "strip_script_comments.ps1") -Root $tree -Check
         if ($LASTEXITCODE -ne 0) { Fail "PowerShell or batch comments remain in the public artifact."; exit 1 }
-    } finally { $ErrorActionPreference = $prevEap }
+    }
+    finally { $ErrorActionPreference = $prevEap }
     Ok "public artifact code is comment-free."
 
     Write-Host ""
     Ok "Artifact verified: $Zip (v$version)"
     exit 0
-} finally {
+}
+finally {
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

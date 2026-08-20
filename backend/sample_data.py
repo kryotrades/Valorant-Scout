@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from agents import AGENTS
 from vconstants import MAPS
@@ -10,35 +11,84 @@ from vconstants import MAPS
 _AGENT_NAMES = [a["name"] for a in AGENTS]
 
 _NAME_PARTS_A = [
-    "Toxic", "Silent", "Rapid", "Phantom", "Neon", "Vexed", "Frost", "Echo",
-    "Lurk", "Solo", "Astra", "Viper", "Crimson", "Hazy", "Quick", "Zero",
-    "Lucid", "Nova", "Karma", "Sage", "Drift", "Pixel", "Ghost", "Riot",
+    "Toxic",
+    "Silent",
+    "Rapid",
+    "Phantom",
+    "Neon",
+    "Vexed",
+    "Frost",
+    "Echo",
+    "Lurk",
+    "Solo",
+    "Astra",
+    "Viper",
+    "Crimson",
+    "Hazy",
+    "Quick",
+    "Zero",
+    "Lucid",
+    "Nova",
+    "Karma",
+    "Sage",
+    "Drift",
+    "Pixel",
+    "Ghost",
+    "Riot",
 ]
 _NAME_PARTS_B = [
-    "Diff", "Lock", "Aim", "Flick", "Smoke", "Clutch", "Dash", "Frag",
-    "Wisp", "Ace", "Peek", "Spike", "Recon", "Bolt", "Edge", "Vibe",
-    "Main", "Andy", "Gamer", "btw", "ttv", "yt", "Op", "Ent",
+    "Diff",
+    "Lock",
+    "Aim",
+    "Flick",
+    "Smoke",
+    "Clutch",
+    "Dash",
+    "Frag",
+    "Wisp",
+    "Ace",
+    "Peek",
+    "Spike",
+    "Recon",
+    "Bolt",
+    "Edge",
+    "Vibe",
+    "Main",
+    "Andy",
+    "Gamer",
+    "btw",
+    "ttv",
+    "yt",
+    "Op",
+    "Ent",
 ]
 _TAGS = ["NA1", "EUW", "APAC", "1337", "GG", "VAL", "KR", "OCE", "000", "RR"]
+
 
 def _seed_int(puuid: str) -> int:
     return int.from_bytes(hashlib.sha256(puuid.encode()).digest()[:8], "big")
 
+
 def _make_name(rng: random.Random) -> str:
     return f"{rng.choice(_NAME_PARTS_A)}{rng.choice(_NAME_PARTS_B)}#{rng.choice(_TAGS)}"
+
 
 def _fake_puuid(rng: random.Random) -> str:
     hexs = "0123456789abcdef"
     raw = "".join(rng.choice(hexs) for _ in range(32))
     return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
 
-def _line(rng: random.Random, rounds: int, won: bool, anchor: float):
-    pass
+
+def _line(rng: random.Random, rounds: int, won: bool, anchor: float) -> dict[str, Any]:
     base_k = rng.uniform(0.55, 0.95) * rounds * (0.85 + anchor * 0.5)
     kills = max(3, int(base_k + rng.uniform(-3, 4)))
     deaths = max(3, int(rounds * rng.uniform(0.45, 0.8)))
     assists = max(0, int(rounds * rng.uniform(0.15, 0.5)))
-    acs = int((kills * 150 + assists * 45 + rng.uniform(-40, 60) * rounds / 10) / max(rounds, 1) * (rounds / 24 + 0.6))
+    acs = int(
+        (kills * 150 + assists * 45 + rng.uniform(-40, 60) * rounds / 10)
+        / max(rounds, 1)
+        * (rounds / 24 + 0.6)
+    )
     acs = max(80, min(acs, 420))
     score = acs * rounds
     hs = round(rng.uniform(14, 44), 1)
@@ -51,8 +101,8 @@ def _line(rng: random.Random, rounds: int, won: bool, anchor: float):
         "hsPct": hs,
     }
 
-def generate_player(puuid: str, match_count: int = 20) -> dict:
-    pass
+
+def generate_player(puuid: str, match_count: int = 20) -> dict[str, Any]:
     rng = random.Random(_seed_int(puuid))
 
     riot_id = _make_name(rng)
@@ -64,10 +114,11 @@ def generate_player(puuid: str, match_count: int = 20) -> dict:
     main_agent = rng.choice(_AGENT_NAMES)
     secondary = rng.sample([a for a in _AGENT_NAMES if a != main_agent], 5)
 
-    friends = [{"puuid": _fake_puuid(rng), "name": _make_name(rng)}
-               for _ in range(rng.randint(2, 4))]
+    friends = [
+        {"puuid": _fake_puuid(rng), "name": _make_name(rng)} for _ in range(rng.randint(2, 4))
+    ]
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     matches = []
     for i in range(match_count):
         mode = "Competitive" if rng.random() < 0.78 else rng.choice(["Unrated", "Swiftplay"])
@@ -88,31 +139,33 @@ def generate_player(puuid: str, match_count: int = 20) -> dict:
         team = []
         n_friends = rng.randint(0, min(3, len(friends)))
         chosen_friends = rng.sample(friends, n_friends)
-        for f in chosen_friends:
-            team.append({
-                "puuid": f["puuid"],
-                "name": f["name"],
-                "agent": rng.choice(_AGENT_NAMES),
-            })
+        team = [
+            {"puuid": f["puuid"], "name": f["name"], "agent": rng.choice(_AGENT_NAMES)}
+            for f in chosen_friends
+        ]
         while len(team) < 4:
-            team.append({
-                "puuid": _fake_puuid(rng),
-                "name": _make_name(rng),
-                "agent": rng.choice(_AGENT_NAMES),
-            })
+            team.append(
+                {
+                    "puuid": _fake_puuid(rng),
+                    "name": _make_name(rng),
+                    "agent": rng.choice(_AGENT_NAMES),
+                }
+            )
 
-        matches.append({
-            "matchId": _fake_puuid(rng),
-            "map": map_name,
-            "mode": mode,
-            "date": (now - timedelta(hours=i * rng.uniform(5, 30))).isoformat(),
-            "result": result,
-            "roundsWon": rw,
-            "roundsLost": rl,
-            "agent": agent,
-            "stats": _line(rng, rounds, won, skill),
-            "teammates": team,
-        })
+        matches.append(
+            {
+                "matchId": _fake_puuid(rng),
+                "map": map_name,
+                "mode": mode,
+                "date": (now - timedelta(hours=i * rng.uniform(5, 30))).isoformat(),
+                "result": result,
+                "roundsWon": rw,
+                "roundsLost": rl,
+                "agent": agent,
+                "stats": _line(rng, rounds, won, skill),
+                "teammates": team,
+            }
+        )
 
     return {
         "puuid": puuid,

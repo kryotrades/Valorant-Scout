@@ -19,7 +19,7 @@ function Show-Phase([int]$step, [string]$text) {
 
     Write-Host ("`r" + $line.PadRight(70)) -NoNewline -ForegroundColor Gray
 }
-function Finish-Progress([string]$text) {
+function Complete-Progress([string]$text) {
     Show-Phase $Script:PhaseTotal $text
     Write-Host ""
 }
@@ -73,7 +73,8 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
                 Write-ScoutLog -Log launcher -Message "auto-update finished - now on v$(Get-LocalVersion)"
                 Write-Host "  Updated to v$(Get-LocalVersion)." -ForegroundColor Green
                 Write-Host ""
-            } else {
+            }
+            else {
 
                 $env:VS_UPDATE_AVAILABLE = $tag
                 Write-ScoutLog -Log launcher -Level WARN -Message "auto-update to $tag failed (rc=$LASTEXITCODE); launching current version"
@@ -81,7 +82,8 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
                 Write-Host ""
             }
         }
-    } catch {
+    }
+    catch {
         Write-ScoutLog -Log launcher -Message "update check/apply skipped: $($_.Exception.Message)"
     }
 }
@@ -96,7 +98,7 @@ Stop-RunningApp "launcher" | Out-Null
 
 
 
-Finish-Progress "Opening the scoreboard..."
+Complete-Progress "Opening the scoreboard..."
 $env:VS_PREVALIDATED = "1"
 $env:VS_ATTACHED_CLI = "1"
 Write-ScoutLog -Log launcher -Message "handing this console to run.py (attached single-window mode)"

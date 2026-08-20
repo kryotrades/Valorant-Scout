@@ -21,20 +21,21 @@ function Write-UpdateState($state) {
 
 
         [System.IO.File]::Replace($temp, $StateFile, [NullString]::Value)
-    } else {
+    }
+    else {
         [System.IO.File]::Move($temp, $StateFile)
     }
 }
 
 
 $PreservePrefixes = @("backend\.env", "backend\data", ".scout", ".venv", ".git",
-                      "frontend\.env.local", "frontend\node_modules", "frontend\.next")
+    "frontend\.env.local", "frontend\node_modules", "frontend\.next")
 
 function Test-Preserved([string]$rel) {
     $rel = $rel -replace '/', '\'
     foreach ($p in $PreservePrefixes) {
         if ($rel.Equals($p, [StringComparison]::OrdinalIgnoreCase) -or
-                $rel.StartsWith("$p\", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            $rel.StartsWith("$p\", [StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
     return $false
 }
@@ -132,12 +133,13 @@ try {
         if ($prev -and $prev.phase -in @("apply", "validate")) {
             Warn2 "A previous update was interrupted mid-apply."
             Restore-FromBackup $prev
-        } else {
+        }
+        else {
             throw "update-state.json is unreadable or has an unknown phase; refusing to continue without a safe rollback plan. Re-extract the last release over this folder."
         }
     }
 
-    if (-not (Is-Installed)) {
+    if (-not (Test-Installed)) {
         Warn2 "Not set up yet - run install.bat first."
         exit 1
     }
@@ -161,11 +163,12 @@ try {
     if ($LocalAssets) {
         if (-not $ExpectVersion) { throw "-LocalAssets requires -ExpectVersion." }
         $newVersion = $ExpectVersion
-        $zipName  = "valorant-scout-v$newVersion.zip"
-        $zip      = Join-Path $LocalAssets $zipName
+        $zipName = "valorant-scout-v$newVersion.zip"
+        $zip = Join-Path $LocalAssets $zipName
         if (-not (Test-Path $zip)) { throw "missing local asset: $zip" }
         Note "Using local assets from $LocalAssets (v$newVersion)."
-    } else {
+    }
+    else {
         Step "Checking for updates ..."
         $rel = Get-LatestRelease
         if (-not $rel) { Note "No update info (offline, or no releases yet) - nothing to do."; exit 0 }
@@ -191,7 +194,8 @@ try {
                 Invoke-WebRequest -Uri $zipUrl -OutFile $zip `
                     -Headers @{ "User-Agent" = "valorant-scout" } -TimeoutSec 300
                 $okDl = $true; break
-            } catch {
+            }
+            catch {
                 Warn2 "download hiccup ($($_.Exception.Message)) - retrying ($i/3) ..."
                 Start-Sleep -Seconds 3
             }
@@ -241,7 +245,7 @@ try {
     $needsVenv = ($newReqHash -ne $oldReqHash -or [string]$newRuntime.pip.version -ne $oldPipVersion)
     if ($needsVenv) {
         $venvBytes = (Get-ChildItem -Path $VenvDir -Recurse -File -ErrorAction SilentlyContinue |
-            Measure-Object -Property Length -Sum).Sum
+                Measure-Object -Property Length -Sum).Sum
         if ($null -eq $venvBytes) { $venvBytes = 0 }
         $transactionBytes = ([long]$venvBytes * 2) + 500MB
         $drive = (Get-Item $Root).PSDrive
@@ -278,18 +282,19 @@ try {
             $dst = Join-Path $backupDir $rel
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
             Copy-Item -Force $src $dst
-        } else {
+        }
+        else {
             $added += $rel
         }
     }
 
     $state = @{
-        phase          = "apply"
-        version        = $newVersion
-        backupDir      = $backupDir
-        addedFiles     = $added
-        venvTouched    = $false
-        venvBackupDir  = ""
+        phase         = "apply"
+        version       = $newVersion
+        backupDir     = $backupDir
+        addedFiles    = $added
+        venvTouched   = $false
+        venvBackupDir = ""
     }
     Write-UpdateState $state
     Write-ScoutLog -Log update -Message "applying v$newVersion (backup at $backupDir)"
@@ -324,10 +329,11 @@ try {
             Write-UpdateState $state
             $resolvedVenv = Assert-IsRepoVenv $VenvDir
             Move-Item -LiteralPath $resolvedVenv -Destination $venvBackupDir
-            $exactPython = Ensure-ExactPython
+            $exactPython = Initialize-ExactPython
             Repair-Venv $exactPython
             Install-PyDeps
-        } else {
+        }
+        else {
 
 
 
@@ -341,7 +347,8 @@ try {
                 if ($LASTEXITCODE -ne 0) { throw "installed dependency versions do not match the release pins." }
                 & $VenvPy (Join-Path $PSScriptRoot "import_smoke.py") 2>&1 | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw "import smoke failed after update." }
-            } finally { $ErrorActionPreference = $prevEap }
+            }
+            finally { $ErrorActionPreference = $prevEap }
         }
 
 
@@ -369,11 +376,13 @@ try {
                 try {
                     $r = Invoke-RestMethod -Uri "http://127.0.0.1:$bport/api/health" -TimeoutSec 2
                     if ($r.ok -and $r.service -eq "valorant-scout" -and $r.wsReady -and
-                            [int]$r.wsPort -eq $wport) { $healthy = $true; break }
-                } catch { Start-Sleep -Milliseconds 700 }
+                        [int]$r.wsPort -eq $wport) { $healthy = $true; break }
+                }
+                catch { Start-Sleep -Milliseconds 700 }
             }
             if (-not $healthy) { throw "updated backend failed its boot health/WS check." }
-        } finally {
+        }
+        finally {
 
 
 
@@ -389,11 +398,13 @@ try {
                         & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
                     }
                 }
-            } finally { $ErrorActionPreference = $prevBootEap }
+            }
+            finally { $ErrorActionPreference = $prevBootEap }
             foreach ($k in $bootEnv.Keys) {
                 if ($oldBootEnv[$k].existed) {
                     Set-Item -Path "Env:$k" -Value $oldBootEnv[$k].value
-                } else {
+                }
+                else {
                     Remove-Item -Path "Env:$k" -ErrorAction SilentlyContinue
                 }
             }
@@ -411,22 +422,26 @@ try {
         Write-Host ""
         Ok "Update complete - now on v$newVersion. Launch with start.bat."
         exit 0
-    } catch {
+    }
+    catch {
         Fail "Update failed: $($_.Exception.Message)"
         Write-ScoutLog -Log update -Level ERROR -Code VS-UPDATE-001 -Message $_.Exception.Message
         Restore-FromBackup ([pscustomobject]$state)
         exit 1
     }
-} catch {
+}
+catch {
     Fail "Update failed: $($_.Exception.Message)"
     Write-ScoutLog -Log update -Level ERROR -Code VS-UPDATE-001 -Message $_.Exception.Message
     if (Test-Path $StateFile) {
         Write-Host "  Automatic rollback could not finish. Do not launch; re-extract the last release over this folder, then run install.bat." -ForegroundColor Yellow
-    } else {
+    }
+    else {
         Write-Host "  Nothing was changed. See $(Join-Path $ScoutDir 'update.log')." -ForegroundColor Yellow
     }
     exit 1
-} finally {
+}
+finally {
     Close-ScoutMutex $appMutex
     Close-ScoutMutex $maintenanceMutex
     if ($lock) { $lock.Close() }

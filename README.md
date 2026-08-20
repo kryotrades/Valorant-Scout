@@ -8,7 +8,8 @@
 
 Reads your **local VALORANT client** in real time and renders it as a slick web dashboard, a colour-coded terminal scoreboard, and your **Discord status** — plus **appear offline**, your **collection value**, **rank/RR history**, a **209-crosshair studio**, a **647-player sensitivity lab**, an instalock helper, a cross-session encounter log, and a VALORANT chat **ASCII art studio**.
 
-### 🌐 [**valorantscout.com**](https://valorantscout.com)
+## 🌐 [**valorantscout.com**](https://valorantscout.com)
+
 Try the live dashboard right now — it runs in **demo mode** with VALORANT closed, no install needed.
 
 [Features](#-features) · [Quick start](#-quick-start) · [Screens](#-screens) · [CLI](#-terminal-cli) · [Discord](#-discord-rich-presence) · [Config](#-configuration) · [Credits](#-credits)
@@ -35,6 +36,7 @@ your machine** and nothing is stored on a server. No account, no login, nothing 
 ## ✨ Features
 
 ### 🎯 Live in-match scoreboard
+
 - **Every player, both teams** — pulled live from the local client the moment you hit Agent Select or load in.
 - **Rank, RR & leaderboard place**, current act + **peak rank with the act it was hit** (`V26 Act 1`), and previous-act rank.
 - **K/D and HS%** — competitive-aware: in a ranked game these aggregate the player's **last 5 competitive matches**; in other modes, their most recent game.
@@ -44,29 +46,38 @@ your machine** and nothing is stored on a server. No account, no login, nothing 
 - **Per-team averages** — avg rank, avg K/D, avg WR, smurf count, and a live **win-probability** bar.
 
 ### 🫥 Appear offline
+
 Launch VALORANT and show up **offline** to your friends — no third-party binary, built from scratch.
+
 - Pick how you appear: **offline / away / mobile** (or back to **online**), from the app or the website.
 - Switch anytime without relaunching — change it in-app, or message the pinned **"Valorant Scout Active"** friend in-game (`offline`, `away`, `mobile`, `online`).
 - Status sticks between launches, and a live indicator confirms you're actually hidden.
 - Close and reopen Scout without breaking the offline session, friends list or matchmaking controls — the windowless relay stays active until Riot and VALORANT close.
 
 ### 🎯 Crosshair library
+
 **209 pro & community crosshairs** with pixel-accurate previews, nine selectable game scenes, movement/firing states, search, filters, favorites, comparison, and a full import-code builder. One click copies a code or share link, and community creations can be submitted for owner review.
 
 ### 🖱️ Pro sensitivity lab
+
 A searchable database of **647 VALORANT player sensitivities** with an eDPI percentile, closest-pro matcher, cm/360 calculation, sensitivity distribution, and physical-distance conversion between eight popular shooters.
 
 ### 💰 Collection value
+
 Your owned skins valued by content tier, plus your wallet (VP / RP / KC). Works straight from the lobby — no match required — and your own collection also shows inside the profile modal.
 
 ### 📈 Rank & RR history
+
 Durable RR/rank history that survives past a single session, a **trends** panel, and a **tilt detector** that flags rough runs.
 
 ### 🕵️ Smurf radar
+
 Heuristic flags that combine **account level vs. peak rank**, **K/D**, and **win-rate** to surface likely smurfs — with the reasons shown on hover.
 
 ### 👤 Deep player profiles
+
 Click any player for a full drill-in:
+
 - **Recent form** — K/D, win%, HS%, K/D/A averages.
 - **Full weapon skin inventory** with real skin art (Standard guns show the base weapon render).
 - **Past games** — agent, map, result, K/D/A, ACS, HS% — click into any match for the full scoreboard.
@@ -74,35 +85,43 @@ Click any player for a full drill-in:
 - One-click **tracker.gg** deep link.
 
 ### 🔓 Hidden-name handling
+
 Resolves Incognito ("hidden") names where the client allows it, and never renders a bare `#` — unknowns fall back to a clean `Player-XXXX` tag.
 
 ### ⚡ Instalock & agent-select tools
+
 - **Auto-instalock** that loops until your agent is locked (or you hit stop), with **per-map agent presets**.
 - **Check side** (attack/defend) and **dodge** buttons.
 - **Region selector** (NA / EU / AP / KR / LATAM / BR) with auto-detect.
 - **Dry-run by default** — you explicitly opt in before anything touches the client.
 
 ### 🗂️ Encounter log
+
 A local JSON ledger of everyone you've played with or against, with play counts and their latest stats — so "haven't I seen this Jett before?" finally has an answer.
 
 ### 🎮 Discord Rich Presence
+
 Shows your VALORANT status on your Discord profile: **map, mode, rank, agent, side and live score** across lobby / agent-select / in-game.
 
 ### ⌨️ Terminal CLI
+
 A fast, colour-coded `rich` scoreboard for a second monitor — same data, no browser.
 
 ### 🖌️ VALORANT ASCII studio
+
 - A searchable **gallery** of chat-ready ASCII art across categories (Animals, Cute, Emojis, Funny, Texts, …).
 - A **creator** with a text→banner generator, paintable draw grid, full-screen focus canvas, paste-safe style picker, favorites, copy trends, and moderated community publishing.
 - Output is encoded the way VALORANT chat actually needs it (visible background fill, fixed-width rows, single-space joins) so the art survives the paste.
 
 ### 🎨 Built to look good
+
 Cinematic dark UI, Framer-Motion animation, big readable type, agent splash art, and a reduced-motion-friendly fallback.
 
 ---
 
-## 🚀 Quick start (Windows — no coding needed)
+## 🚀 Quick start
 
+**Windows only — no coding needed.**
 **Supported:** Windows 10/11 **x64**, standard user account. The installer sets up its own
 CPython **3.12.10 x64** runtime (verified download from python.org) — other Pythons on your PC
 are never touched. ARM64 and 32-bit Windows are not supported.
@@ -138,30 +157,37 @@ fully-populated **demo mode**, so you can explore the UI any time.
 > Windows SmartScreen may warn about a downloaded `.bat` — choose *More info → Run anyway*.
 
 ### Developers / manual run
+
 ```bash
 pip install -r backend/requirements.txt
 python run.py            # backend + terminal scoreboard, against the hosted dashboard
 python run.py --no-cli   # backend only (no terminal window)
 python run.py --cli      # terminal scoreboard only
 ```
+
 ---
 
 ## 🖼️ Screens
 
 ### Live scoreboard
+
 ![VALORANT live scoreboard showing ranks, RR, K/D, win rate, and party detection](https://valorantscout.com/shots/scoreboard.png)
 
 ### Player profile
+
 ![VALORANT player profile with match history, stats, and skin inventory](https://valorantscout.com/shots/profile.png)
 
 ### ASCII chat-art studio — gallery & creator
+
 ![VALORANT ASCII chat-art studio gallery](https://valorantscout.com/shots/ascii-gallery.png)
 ![ASCII creator](docs/screenshots/ascii-creator.png)
 
 ### Terminal CLI
+
 ![Terminal scoreboard](docs/screenshots/cli.svg)
 
 ### Discord Rich Presence
+
 ![Discord presence](docs/screenshots/discord.png)
 
 ---
@@ -201,7 +227,7 @@ Copy `backend/.env.example` to `backend/.env`. **Everything is optional** — th
 
 ## 🏗️ How it works
 
-```
+```text
 VALORANT local client  ──►  Flask API (backend/)  ──►  Next.js dashboard (frontend/)
    lockfile + edge APIs        live_match pipeline         React + Tailwind + Motion
                                     │  └─►  Rich terminal CLI (cli.py)
@@ -212,6 +238,14 @@ VALORANT local client  ──►  Flask API (backend/)  ──►  Next.js dashb
 - **`frontend/`** — Next.js (pages router) + Tailwind + Framer Motion.
 - **`cli.py`** — standalone terminal scoreboard.
 - **`run.py`** — one-command launcher for the whole stack.
+
+---
+
+## 🛠️ Working on Valorant Scout
+
+`scripts\setup.ps1` once, then `scripts\lint.ps1` before every push — it is the
+only entry point, and the git hooks call it and nothing else. The rules it
+enforces and the reasons behind them live in [`AGENTS.md`](AGENTS.md).
 
 ---
 

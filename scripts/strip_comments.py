@@ -9,10 +9,12 @@ import tokenize
 _BODY_FIELDS = ("body", "orelse", "finalbody")
 
 
-def _is_bare_string(stmt) -> bool:
-    return (isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and isinstance(stmt.value.value, str))
+def _is_bare_string(stmt: ast.stmt) -> bool:
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and isinstance(stmt.value.value, str)
+    )
 
 
 def _string_statement_spans(tree: ast.AST) -> list[tuple[int, int, bool, int]]:
@@ -27,8 +29,7 @@ def _string_statement_spans(tree: ast.AST) -> list[tuple[int, int, bool, int]]:
                 continue
             empties = len(strings) == len(body) and not isinstance(node, ast.Module)
             for i, stmt in enumerate(strings):
-                spans.append((stmt.lineno, stmt.end_lineno,
-                              empties and i == 0, stmt.col_offset))
+                spans.append((stmt.lineno, stmt.end_lineno, empties and i == 0, stmt.col_offset))
     return spans
 
 
@@ -64,7 +65,7 @@ def strip_source(src: str) -> str:
         if i in drop:
             continue
         if i in comments:
-            kept = line[:comments[i]].rstrip()
+            kept = line[: comments[i]].rstrip()
             if not kept:
                 continue
             out.append(kept)
@@ -115,8 +116,9 @@ def main(root: str, check: bool = False) -> int:
         print(f"verified {files} Python files contain no comments or docstrings")
     else:
         saved = 100 * (before - after) / before if before else 0
-        print(f"stripped {files} python files: {before:,} -> {after:,} bytes "
-              f"({saved:.1f}% smaller)")
+        print(
+            f"stripped {files} python files: {before:,} -> {after:,} bytes ({saved:.1f}% smaller)"
+        )
     return 0
 
 

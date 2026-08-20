@@ -7,7 +7,6 @@ import re
 import sys
 from pathlib import Path
 
-
 PIN_RE = re.compile(r"^([A-Za-z0-9._\[\]-]+)==([A-Za-z0-9._+!-]+)$")
 
 

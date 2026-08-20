@@ -1,0 +1,17 @@
+# typos — spell check for code and prose. Domain vocabulary goes here, never as
+# an inline allow comment: lint.ps1 rejects those, and a word worth allowing is
+# worth writing down where the next person can see it.
+[files]
+extend-exclude = [".venv/", "dist/", "*.lock", "*.pem", "docs/screenshots/"]
+
+[default.extend-words]
+# Riot region tags: three-letter codes, not words.
+OCE = "OCE"
+# XMPP: Multi-User Chat, the room type Riot's party chat uses.
+MUC = "MUC"
+muc = "muc"
+# Agent names. Riot did not consult a dictionary.
+Yoru = "Yoru"
+# Appears inside the base64 X-Riot-ClientPlatform blob, and in Unreal Engine
+# paths in the game's own log lines.
+UE = "UE"

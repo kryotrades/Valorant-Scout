@@ -4,31 +4,36 @@ import json
 import os
 import threading
 import time
+from typing import TYPE_CHECKING, Any
 
 from flask import Flask, jsonify, request
+
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
 from flask_cors import CORS
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
 
 import discord_presence
 import encounter_log
-import scoutlog
-import sync
-import pick_advisor
-import live_match
-import party_detector
-import sample_match
-import session_tracker
 import history
 import inventory
+import live_match
 import match_meta
+import party_detector
+import pick_advisor
+import sample_match
+import scoutlog
+import session_tracker
+import sync
 from agents import AGENTS, resolve_agent
 from instalock_worker import InstalockWorker
-from riot_client import REGIONS, LocalAuth, RiotClient, ClientNotReady
+from riot_client import REGIONS, ClientNotReadyError, LocalAuth, RiotClient
 from vconstants import APP_VERSION, STATES, rank_from_tier
 
 app = Flask(__name__)
@@ -41,7 +46,7 @@ for _h in scoutlog.get_logger("backend").handlers:
 client = RiotClient()
 instalock_worker = InstalockWorker()
 
-_CACHE: dict[str, tuple[float, dict]] = {}
+_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = float(os.getenv("PLAYER_CACHE_TTL", "60"))
 _ENCOUNTER_BACKFILL_AT: dict[str, float] = {}
 _ENCOUNTER_BACKFILL_LOCK = threading.Lock()
@@ -49,10 +54,10 @@ _ENCOUNTER_BACKFILL_LOCK = threading.Lock()
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "data", "settings.json")
 _SETTINGS_LOCK = threading.Lock()
 
-_SETTINGS_KEYS = {"region", "agent", "mode", "delay", "dryRun", "perMap",
-                  "autoRefresh"}
+_SETTINGS_KEYS = {"region", "agent", "mode", "delay", "dryRun", "perMap", "autoRefresh"}
 
-def _load_settings() -> dict:
+
+def _load_settings() -> dict[str, Any]:
     try:
         with open(_SETTINGS_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -60,18 +65,30 @@ def _load_settings() -> dict:
     except Exception:
         return {}
 
-def _save_settings(data: dict) -> None:
+
+def _save_settings(data: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
     tmp = f"{_SETTINGS_PATH}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
     os.replace(tmp, _SETTINGS_PATH)
 
-def _summarize(matches: list[dict]) -> dict:
+
+def _summarize(matches: list[dict[str, Any]]) -> dict[str, Any]:
     n = len(matches)
     if n == 0:
-        return {"matchesAnalyzed": 0, "kills": 0, "deaths": 0, "assists": 0,
-                "kd": 0, "kda": 0, "hsPct": 0, "winRate": 0, "wins": 0, "losses": 0}
+        return {
+            "matchesAnalyzed": 0,
+            "kills": 0,
+            "deaths": 0,
+            "assists": 0,
+            "kd": 0,
+            "kda": 0,
+            "hsPct": 0,
+            "winRate": 0,
+            "wins": 0,
+            "losses": 0,
+        }
     k = sum(m["stats"]["kills"] for m in matches)
     d = sum(m["stats"]["deaths"] for m in matches)
     a = sum(m["stats"]["assists"] for m in matches)
@@ -91,10 +108,15 @@ def _summarize(matches: list[dict]) -> dict:
         "losses": losses,
     }
 
-def _decorate_match(m: dict, suggestion: dict) -> dict:
+
+def _decorate_match(m: dict[str, Any], suggestion: dict[str, Any]) -> dict[str, Any]:
     meta = resolve_agent(m.get("agent")) or {}
     st = m["stats"]
-    kda = round((st["kills"] + st["assists"]) / st["deaths"], 2) if st["deaths"] else float(st["kills"] + st["assists"])
+    kda = (
+        round((st["kills"] + st["assists"]) / st["deaths"], 2)
+        if st["deaths"]
+        else float(st["kills"] + st["assists"])
+    )
     out = dict(m)
     out.pop("teammates", None)
     out["agentMeta"] = {
@@ -111,7 +133,8 @@ def _decorate_match(m: dict, suggestion: dict) -> dict:
     }
     return out
 
-def build_player_payload(puuid: str) -> dict:
+
+def build_player_payload(puuid: str) -> dict[str, Any]:
     raw = client.get_player_overview(puuid)
     matches = raw.get("matches", [])
 
@@ -122,7 +145,7 @@ def build_player_payload(puuid: str) -> dict:
 
     decorated = [_decorate_match(m, suggestion) for m in party["matches"]]
 
-    for dm, pm in zip(decorated, party["matches"]):
+    for dm, pm in zip(decorated, party["matches"], strict=True):
         dm["partyMembers"] = pm.get("partyMembers", [])
 
     return {
@@ -144,36 +167,40 @@ def build_player_payload(puuid: str) -> dict:
         "matches": decorated,
     }
 
-@app.get("/api/health")
-def health():
-    import ws_server as _ws
-    return jsonify({
-        "ok": True,
-        "service": "valorant-scout",
-        "appVersion": APP_VERSION,
-        "protocol": _ws.PROTOCOL_VERSION,
-        "wsReady": _ws.is_ready(),
-        "wsPort": _ws.listening_port(),
-        "dataSourcePreference": client.source_pref,
-        "officialKey": bool(client.api_key),
-        "liveInstalockEnabled": client.allow_live_instalock,
 
-        "clientStatus": "ok" if LocalAuth.available() else "not_running",
-    })
+@app.get("/api/health")
+def health() -> ResponseReturnValue:
+    import ws_server as _ws
+
+    return jsonify(
+        {
+            "ok": True,
+            "service": "valorant-scout",
+            "appVersion": APP_VERSION,
+            "protocol": _ws.PROTOCOL_VERSION,
+            "wsReady": _ws.is_ready(),
+            "wsPort": _ws.listening_port(),
+            "dataSourcePreference": client.source_pref,
+            "officialKey": bool(client.api_key),
+            "liveInstalockEnabled": client.allow_live_instalock,
+            "clientStatus": "ok" if LocalAuth.available() else "not_running",
+        }
+    )
+
 
 @app.get("/api/agents")
-def agents():
+def agents() -> ResponseReturnValue:
     return jsonify({"agents": AGENTS, "count": len(AGENTS)})
 
+
 @app.get("/api/settings")
-def settings_get():
-    pass
+def settings_get() -> ResponseReturnValue:
     with _SETTINGS_LOCK:
         return jsonify(_load_settings())
 
+
 @app.post("/api/settings")
-def settings_post():
-    pass
+def settings_post() -> ResponseReturnValue:
     body = request.get_json(silent=True) or {}
     incoming = {k: v for k, v in body.items() if k in _SETTINGS_KEYS}
     with _SETTINGS_LOCK:
@@ -183,21 +210,23 @@ def settings_post():
             _save_settings(merged)
         except Exception as e:
             app.logger.exception("settings save failed")
-            return jsonify({"ok": False, "message": str(e),
-                            "settings": merged}), 200
+            return jsonify({"ok": False, "message": str(e), "settings": merged}), 200
     return jsonify({"ok": True, "settings": merged})
+
 
 def _live_enabled() -> bool:
     return client.source_pref != "demo" and LocalAuth.available()
 
-def _attach_encounters(board: dict) -> dict:
-    pass
+
+def _attach_encounters(board: dict[str, Any]) -> dict[str, Any]:
     is_live = board.get("source") == "local"
     self_team = board.get("selfTeam")
     for p in board.get("players") or []:
         if not isinstance(p, dict):
             continue
-        enc = encounter_log.encounter_for(board.get("selfPuuid"), p.get("puuid")) if is_live else None
+        enc = (
+            encounter_log.encounter_for(board.get("selfPuuid"), p.get("puuid")) if is_live else None
+        )
 
         if enc:
             if self_team is not None and p.get("team") == self_team:
@@ -207,23 +236,30 @@ def _attach_encounters(board: dict) -> dict:
         p["encounter"] = enc
     return board
 
-def _client_notice() -> dict:
-    pass
-    if not LocalAuth.available():
-        return {"level": "info", "action": "open_game",
-                "message": "Open VALORANT to see live ranks, parties and stats."}
-    return {"level": "warn", "action": "restart_game",
-            "message": "Couldn't read VALORANT — please restart your game "
-                       "(close it completely and relaunch), then try again."}
 
-_LAST_GOOD = {"board": None, "at": 0.0, "notReady": False}
+def _client_notice() -> dict[str, Any]:
+    if not LocalAuth.available():
+        return {
+            "level": "info",
+            "action": "open_game",
+            "message": "Open VALORANT to see live ranks, parties and stats.",
+        }
+    return {
+        "level": "warn",
+        "action": "restart_game",
+        "message": "Couldn't read VALORANT — please restart your game "
+        "(close it completely and relaunch), then try again.",
+    }
+
+
+_LAST_GOOD: dict[str, Any] = {"board": None, "at": 0.0, "notReady": False}
 _HOLD_SECS = 12
 
 _BUILD_LOCK = threading.Lock()
 _BUILD_FRESH = 3.5
 
-def build_live(seed: int = 7, want_state: str | None = None) -> dict:
-    pass
+
+def build_live(seed: int = 7, want_state: str | None = None) -> dict[str, Any]:
     notice = None
     if _live_enabled():
         with _BUILD_LOCK:
@@ -254,7 +290,7 @@ def build_live(seed: int = 7, want_state: str | None = None) -> dict:
                 _LAST_GOOD["notReady"] = False
                 return board
             except Exception as e:
-                if isinstance(e, ClientNotReady):
+                if isinstance(e, ClientNotReadyError):
                     if not _LAST_GOOD["notReady"]:
                         app.logger.info("live scoreboard: %s — waiting for sign-in", e)
                         _LAST_GOOD["notReady"] = True
@@ -265,37 +301,48 @@ def build_live(seed: int = 7, want_state: str | None = None) -> dict:
                     return _LAST_GOOD["board"]
                 notice = _client_notice()
                 if client.source_pref == "local":
-                    return {"state": "OFFLINE", "stateLabel": "Offline", "source": "local",
-                            "error": str(e), "players": [], "teams": {}, "parties": [],
-                            "notice": notice, "appVersion": APP_VERSION}
+                    return {
+                        "state": "OFFLINE",
+                        "stateLabel": "Offline",
+                        "source": "local",
+                        "error": str(e),
+                        "players": [],
+                        "teams": {},
+                        "parties": [],
+                        "notice": notice,
+                        "appVersion": APP_VERSION,
+                    }
     elif client.source_pref != "demo" and not LocalAuth.available():
-
         notice = _client_notice()
 
-    board = (sample_match.generate_lobby(seed)
-             if (want_state or "").lower() == "menus"
-             else sample_match.generate(seed))
+    board = (
+        sample_match.generate_lobby(seed)
+        if (want_state or "").lower() == "menus"
+        else sample_match.generate(seed)
+    )
     board = _attach_encounters(board)
     if notice:
         board["notice"] = notice
     board["appVersion"] = APP_VERSION
     return board
 
+
 @app.get("/api/state")
-def state():
-    pass
+def state() -> ResponseReturnValue:
     if _live_enabled():
         try:
             lm = live_match.LiveMatch(LocalAuth())
             st = lm.game_state(lm._presences())
             return jsonify({"state": st, "stateLabel": STATES.get(st, st), "source": "local"})
         except Exception as e:
-            return jsonify({"state": "OFFLINE", "stateLabel": "Offline",
-                            "source": "local", "error": str(e)})
+            return jsonify(
+                {"state": "OFFLINE", "stateLabel": "Offline", "source": "local", "error": str(e)}
+            )
     return jsonify({"state": "INGAME", "stateLabel": "In Game", "source": "demo"})
 
+
 @app.get("/api/live")
-def live():
+def live() -> ResponseReturnValue:
     try:
         seed = int(request.args.get("seed", 7))
     except (TypeError, ValueError):
@@ -330,35 +377,50 @@ def _refresh_encounter_history(owner: str | None) -> None:
                     continue
                 current = rank_from_tier(tier)
                 peak = rank_from_tier(rank.get("peak") or tier)
-                encounter_log.enrich_player(owner, puuid, {
-                    "name": teammate.get("name"),
-                    "rank": current["name"],
-                    "peakRank": peak["name"],
-                    "rankTier": current["tier"],
-                    "peakTier": peak["tier"],
-                    "rankColor": current["color"],
-                    "winRate": rank.get("wr"),
-                })
+                encounter_log.enrich_player(
+                    owner,
+                    puuid,
+                    {
+                        "name": teammate.get("name"),
+                        "rank": current["name"],
+                        "peakRank": peak["name"],
+                        "rankTier": current["tier"],
+                        "peakTier": peak["tier"],
+                        "rankColor": current["color"],
+                        "winRate": rank.get("wr"),
+                    },
+                )
         except Exception:
             _ENCOUNTER_BACKFILL_AT.pop(owner, None)
             app.logger.exception("encounter history backfill failed")
 
+
 @app.get("/api/encounters")
-def encounters():
-    pass
+def encounters() -> ResponseReturnValue:
     if client.source_pref == "demo":
-        return jsonify({"players": sample_match.encounters(), "accountCount": 1,
-                        "scope": request.args.get("scope", "current")})
+        return jsonify(
+            {
+                "players": sample_match.encounters(),
+                "accountCount": 1,
+                "scope": request.args.get("scope", "current"),
+            }
+        )
     owner = _current_puuid()
     _refresh_encounter_history(owner)
     scope = "all" if request.args.get("scope") == "all" else "current"
-    return jsonify({"players": encounter_log.get_all_accounts(owner) if scope == "all"
-                    else encounter_log.get_all(owner),
-                    "accountCount": encounter_log.account_count(), "scope": scope})
+    return jsonify(
+        {
+            "players": encounter_log.get_all_accounts()
+            if scope == "all"
+            else encounter_log.get_all(owner),
+            "accountCount": encounter_log.account_count(),
+            "scope": scope,
+        }
+    )
+
 
 @app.get("/api/recap")
-def recap():
-    pass
+def recap() -> ResponseReturnValue:
     live_recap = session_tracker.current_recap() if _live_enabled() else None
     try:
         seed = int(request.args.get("seed", 7))
@@ -379,72 +441,87 @@ def _current_puuid() -> str | None:
 
 
 @app.get("/api/sessions")
-def sessions_get():
+def sessions_get() -> ResponseReturnValue:
     return jsonify(session_tracker.list_for(_current_puuid()))
 
 
 @app.post("/api/session/start")
-def session_start():
+def session_start() -> ResponseReturnValue:
     owner = _current_puuid()
     baseline = history.payload(owner).get("summary", {}) if owner else None
-    return jsonify(session_tracker.start(owner, (request.get_json(silent=True) or {}).get("goal"), baseline))
+    goal = (request.get_json(silent=True) or {}).get("goal")
+    return jsonify(session_tracker.start(owner, goal, baseline))
 
 
 @app.post("/api/session/end")
-def session_end():
+def session_end() -> ResponseReturnValue:
     return jsonify(session_tracker.end(_current_puuid()))
 
 
 @app.delete("/api/sessions/<session_id>")
-def session_delete(session_id: str):
+def session_delete(session_id: str) -> ResponseReturnValue:
     return jsonify(session_tracker.delete(_current_puuid(), session_id.strip()))
 
 
 @app.post("/api/session/reset")
-def session_reset():
+def session_reset() -> ResponseReturnValue:
     body = request.get_json(silent=True) or {}
     return jsonify(session_tracker.reset(_current_puuid(), body.get("goal")))
 
 
 @app.post("/api/remote-mode")
-def remote_mode():
+def remote_mode() -> ResponseReturnValue:
     if _COMMAND_ROUTER is None:
-        return jsonify({"ok": False, "configured": False,
-                        "message": "The local command bridge is still starting."}), 503
+        return jsonify(
+            {
+                "ok": False,
+                "configured": False,
+                "message": "The local command bridge is still starting.",
+            }
+        ), 503
     body = request.get_json(silent=True) or {}
     action = "disable_remote" if body.get("action") == "disable" else "enable_remote"
     result = _COMMAND_ROUTER.execute(
-        client_id=f"http:{request.remote_addr or 'local'}", command=action,
-        payload={}, command_id=body.get("id"))
+        client_id=f"http:{request.remote_addr or 'local'}",
+        command=action,
+        payload={},
+        command_id=body.get("id"),
+    )
     return jsonify(result)
 
 
-def _insights_payload(timezone_name: str | None = None) -> dict:
+def _insights_payload(timezone_name: str | None = None) -> dict[str, Any]:
     puuid = None
     if _live_enabled():
         try:
             auth = LocalAuth()
             auth.headers()
             puuid = auth.puuid
-            threading.Thread(target=history.refresh,
-                             args=(auth, timezone_name), daemon=True,
-                             name=f"rr-refresh-{str(puuid)[:8]}").start()
+            threading.Thread(
+                target=history.refresh,
+                args=(auth, timezone_name),
+                daemon=True,
+                name=f"rr-refresh-{str(puuid)[:8]}",
+            ).start()
         except Exception:
             app.logger.exception("rr history refresh failed")
     return history.payload(puuid, timezone_name)
 
 
-def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20) -> dict:
+def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20) -> dict[str, Any]:
     payload = _insights_payload(timezone_name)
     owner = (payload.get("account") or {}).get("puuid")
     if owner and _live_enabled():
-        def enrich_recent():
+
+        def enrich_recent() -> None:
             try:
                 history.enrich(live_match.LiveMatch(LocalAuth()), owner, rich_limit)
             except Exception:
                 app.logger.exception("performance enrichment failed")
-        threading.Thread(target=enrich_recent, daemon=True,
-                         name=f"perf-enrich-{str(owner)[:8]}").start()
+
+        threading.Thread(
+            target=enrich_recent, daemon=True, name=f"perf-enrich-{str(owner)[:8]}"
+        ).start()
     if owner:
         session_tracker.ensure_active(owner, payload.get("summary", {}))
     payload["sessions"] = session_tracker.list_for(owner)
@@ -452,20 +529,22 @@ def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20)
     payload["encounters"] = encounter_log.get_all(owner)
     return payload
 
+
 @app.get("/api/insights")
-def insights():
+def insights() -> ResponseReturnValue:
     return jsonify(_insights_payload(request.args.get("tz")))
 
 
 @app.get("/api/performance")
-def performance():
+def performance() -> ResponseReturnValue:
     try:
         rich_limit = int(request.args.get("richLimit", 20))
     except (TypeError, ValueError):
         rich_limit = 20
     return jsonify(_performance_payload(request.args.get("tz"), rich_limit))
 
-def _inventory_payload() -> dict:
+
+def _inventory_payload() -> dict[str, Any]:
     if not _live_enabled():
         return {
             "available": False,
@@ -478,39 +557,47 @@ def _inventory_payload() -> dict:
         data = inventory.snapshot(auth)
         owner = getattr(auth, "puuid", None)
         return data
-    except ClientNotReady:
+    except ClientNotReadyError:
         owner = getattr(auth, "puuid", None)
         cached = inventory.last_good(owner)
         if cached:
             return cached
-        return {"available": False, "retryable": True,
-                "error": "Your collection is still loading from Riot."}
+        return {
+            "available": False,
+            "retryable": True,
+            "error": "Your collection is still loading from Riot.",
+        }
     except Exception:
         app.logger.exception("inventory snapshot failed")
         cached = inventory.last_good(owner)
         if cached:
             return cached
-        return {"available": False,
-                "retryable": True,
-                "error": "Couldn't read your collection from the Riot client."}
+        return {
+            "available": False,
+            "retryable": True,
+            "error": "Couldn't read your collection from the Riot client.",
+        }
+
 
 @app.get("/api/inventory")
-def inventory_route():
+def inventory_route() -> ResponseReturnValue:
     return jsonify(_inventory_payload())
 
+
 @app.get("/api/encounters/<puuid>")
-def encounter(puuid: str):
-    pass
+def encounter(puuid: str) -> ResponseReturnValue:
     return jsonify(encounter_log.get_one(_current_puuid(), puuid.strip()))
 
 
 @app.put("/api/matches/<match_id>/meta")
-def match_meta_update(match_id: str):
-    return jsonify(match_meta.update(_current_puuid(), match_id.strip(), request.get_json(silent=True) or {}))
+def match_meta_update(match_id: str) -> ResponseReturnValue:
+    return jsonify(
+        match_meta.update(_current_puuid(), match_id.strip(), request.get_json(silent=True) or {})
+    )
+
 
 @app.get("/api/match/<match_id>")
-def match(match_id: str):
-    pass
+def match(match_id: str) -> ResponseReturnValue:
     subject = request.args.get("subject")
     if _live_enabled():
         try:
@@ -521,9 +608,9 @@ def match(match_id: str):
             app.logger.exception("match detail failed")
     return jsonify(sample_match.match_detail(match_id, subject))
 
+
 @app.get("/api/debug/reveal")
-def debug_reveal():
-    pass
+def debug_reveal() -> ResponseReturnValue:
     if not _live_enabled():
         return jsonify({"error": "Live client not available — open VALORANT."}), 400
     try:
@@ -532,9 +619,9 @@ def debug_reveal():
         app.logger.exception("debug reveal failed")
         return jsonify({"error": str(e)}), 500
 
+
 @app.get("/api/profile/<puuid>")
-def profile(puuid: str):
-    pass
+def profile(puuid: str) -> ResponseReturnValue:
     puuid = puuid.strip()
     if not puuid:
         return jsonify({"error": "puuid required"}), 400
@@ -559,8 +646,9 @@ def profile(puuid: str):
     _CACHE[f"profile:{puuid}"] = (now, data)
     return jsonify(data)
 
+
 @app.get("/api/player/<puuid>")
-def player(puuid: str):
+def player(puuid: str) -> ResponseReturnValue:
     puuid = puuid.strip()
     if not puuid or len(puuid) < 6:
         return jsonify({"error": "A valid PUUID (or Riot identifier) is required."}), 400
@@ -579,9 +667,9 @@ def player(puuid: str):
     _CACHE[puuid] = (now, payload)
     return jsonify(payload)
 
+
 @app.get("/api/region")
-def region():
-    pass
+def region() -> ResponseReturnValue:
     detected = None
     if LocalAuth.available():
         try:
@@ -590,28 +678,34 @@ def region():
             detected = None
     return jsonify({"detected": detected, "regions": REGIONS})
 
+
 @app.post("/api/dodge")
-def dodge():
+def dodge() -> ResponseReturnValue:
     body = request.get_json(silent=True) or {}
-    result = client.dodge(dry_run=bool(body.get("dryRun", True)),
-                          region=body.get("region"))
+    result = client.dodge(dry_run=bool(body.get("dryRun", True)), region=body.get("region"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
+
 @app.post("/api/launch-offline")
-def launch_offline():
+def launch_offline() -> ResponseReturnValue:
     import offline_launch
+
     body = request.get_json(silent=True) or {}
     result = offline_launch.launch(body.get("status"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
+
 @app.get("/api/offline-status")
-def offline_status():
+def offline_status() -> ResponseReturnValue:
     import offline_launch
+
     return jsonify(offline_launch.status())
 
+
 @app.post("/api/offline-toggle")
-def offline_toggle():
+def offline_toggle() -> ResponseReturnValue:
     import offline_launch
+
     body = request.get_json(silent=True) or {}
     if "status" in body:
         result = offline_launch.set_status(str(body["status"]))
@@ -619,14 +713,14 @@ def offline_toggle():
         result = offline_launch.set_enabled(bool(body.get("enabled", True)))
     return jsonify(result), (200 if result.get("ok") else 400)
 
+
 @app.get("/api/queue")
-def queue_get():
-    pass
+def queue_get() -> ResponseReturnValue:
     return jsonify(client.party_state())
 
+
 @app.post("/api/queue")
-def queue_post():
-    pass
+def queue_post() -> ResponseReturnValue:
     body = request.get_json(silent=True) or {}
     action = (body.get("action") or "").lower()
     dry = bool(body.get("dryRun", True))
@@ -638,27 +732,25 @@ def queue_post():
     elif action == "stop":
         result = client.stop_queue(dry_run=dry, region=region)
     else:
-        return jsonify({"ok": False,
-                        "message": "action must be start|stop|select"}), 400
+        return jsonify({"ok": False, "message": "action must be start|stop|select"}), 400
     result["queue"] = client.party_state(region)
     return jsonify(result), (200 if result.get("ok") else 400)
 
+
 @app.post("/api/instalock")
-def instalock():
-    pass
+def instalock() -> ResponseReturnValue:
     body = request.get_json(silent=True) or {}
     agent = body.get("agent")
     mode = (body.get("mode") or "lock").lower()
     dry_run = bool(body.get("dryRun", True))
     if not agent:
         return jsonify({"ok": False, "message": "Field 'agent' is required."}), 400
-    result = client.instalock(agent, mode=mode, dry_run=dry_run,
-                              region=body.get("region"))
+    result = client.instalock(agent, mode=mode, dry_run=dry_run, region=body.get("region"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
+
 @app.post("/api/instalock/start")
-def instalock_start():
-    pass
+def instalock_start() -> ResponseReturnValue:
     body = request.get_json(silent=True) or {}
     agent = body.get("agent")
     mode = (body.get("mode") or "lock").lower()
@@ -674,35 +766,53 @@ def instalock_start():
             return jsonify({"ok": False, "message": f"Unknown agent '{agent}'."}), 400
         for mapn, name in (per_map or {}).items():
             if not resolve_agent(name):
-                return jsonify({"ok": False,
-                                "message": f"Unknown agent '{name}' for map '{mapn}'."}), 400
-        return jsonify({"ok": True, "status": "dry-run", "agent": ag["name"],
-                        "perMap": per_map or {},
-                        "message": f"DRY-RUN: would {mode} {ag['name']} (per-map "
-                                   f"overrides applied) when agent select starts. "
-                                   f"Turn dry-run OFF to auto-lock."})
-    result = instalock_worker.start(agent, mode=mode, delay=delay, region=region,
-                                    per_map=per_map)
+                return jsonify(
+                    {"ok": False, "message": f"Unknown agent '{name}' for map '{mapn}'."}
+                ), 400
+        return jsonify(
+            {
+                "ok": True,
+                "status": "dry-run",
+                "agent": ag["name"],
+                "perMap": per_map or {},
+                "message": f"DRY-RUN: would {mode} {ag['name']} (per-map "
+                f"overrides applied) when agent select starts. "
+                f"Turn dry-run OFF to auto-lock.",
+            }
+        )
+    result = instalock_worker.start(agent, mode=mode, delay=delay, region=region, per_map=per_map)
     return jsonify(result), (200 if result.get("ok") else 400)
 
+
 @app.post("/api/instalock/stop")
-def instalock_stop():
+def instalock_stop() -> ResponseReturnValue:
     return jsonify(instalock_worker.stop())
 
+
 @app.get("/api/instalock/status")
-def instalock_status():
+def instalock_status() -> ResponseReturnValue:
     return jsonify(instalock_worker.status())
 
-@app.get("/")
-def index():
-    return jsonify({
-        "service": "Valorant Scout API",
-        "endpoints": ["/api/health", "/api/live", "/api/profile/<puuid>", "/api/agents",
-                      "/api/instalock/start", "/api/settings", "/api/encounters"],
-    })
 
-def _current_weapons(puuid: str) -> list:
-    pass
+@app.get("/")
+def index() -> ResponseReturnValue:
+    return jsonify(
+        {
+            "service": "Valorant Scout API",
+            "endpoints": [
+                "/api/health",
+                "/api/live",
+                "/api/profile/<puuid>",
+                "/api/agents",
+                "/api/instalock/start",
+                "/api/settings",
+                "/api/encounters",
+            ],
+        }
+    )
+
+
+def _current_weapons(puuid: str) -> list[Any]:
     try:
         board = build_live(7, None)
         for p in board.get("players") or []:
@@ -712,8 +822,8 @@ def _current_weapons(puuid: str) -> list:
         pass
     return []
 
-def handle_data_request(req_type: str, params: dict | None) -> dict:
-    pass
+
+def handle_data_request(req_type: str, params: dict[str, Any] | None) -> dict[str, Any]:
     params = params or {}
     try:
         if req_type == "profile":
@@ -754,10 +864,11 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             return sample_match.match_detail(match_id, subject)
 
         if req_type == "encounter":
-            return encounter_log.get_one(_current_puuid(), (params.get("puuid") or "").strip()) or {}
+            return (
+                encounter_log.get_one(_current_puuid(), (params.get("puuid") or "").strip()) or {}
+            )
 
         if req_type == "recap":
-
             live_recap = session_tracker.current_recap() if _live_enabled() else None
             return live_recap or sample_match.recap(int(params.get("seed") or 7))
 
@@ -765,9 +876,13 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             owner = _current_puuid()
             _refresh_encounter_history(owner)
             scope = "all" if params.get("scope") == "all" else "current"
-            return {"players": encounter_log.get_all_accounts(owner) if scope == "all"
-                    else encounter_log.get_all(owner),
-                    "accountCount": encounter_log.account_count(), "scope": scope}
+            return {
+                "players": encounter_log.get_all_accounts()
+                if scope == "all"
+                else encounter_log.get_all(owner),
+                "accountCount": encounter_log.account_count(),
+                "scope": scope,
+            }
 
         if req_type == "insights":
             return _insights_payload(params.get("tz"))
@@ -787,19 +902,18 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
         return {"error": f"request failed: {e}"}
     return {"error": f"unknown request '{req_type}'"}
 
+
 def _start_ws_bridge() -> None:
-    pass
     global _COMMAND_ROUTER
-    import ws_server
-    import scout_commands
     import remote_ably
+    import scout_commands
+    import ws_server
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
     ws_port = int(os.getenv("WS_PORT", "7878"))
-    token_endpoint = os.getenv("ABLY_TOKEN_ENDPOINT",
-                               f"{frontend_url}/api/ably-token")
+    token_endpoint = os.getenv("ABLY_TOKEN_ENDPOINT", f"{frontend_url}/api/ably-token")
 
-    def ws_state_provider() -> dict:
+    def ws_state_provider() -> dict[str, Any]:
 
         board = dict(build_live(7, None))
         board["instalock"] = instalock_worker.status()
@@ -808,39 +922,57 @@ def _start_ws_bridge() -> None:
         return board
 
     remote_controller = remote_ably.RemoteController(
-        frontend_url=frontend_url, token_endpoint=token_endpoint,
-        board_provider=ws_state_provider, data_handler=handle_data_request)
+        frontend_url=frontend_url,
+        token_endpoint=token_endpoint,
+        board_provider=ws_state_provider,
+        data_handler=handle_data_request,
+    )
     router = scout_commands.CommandRouter(
-        instalock_worker=instalock_worker, riot_client=client,
-        board_provider=ws_state_provider, remote_controller=remote_controller)
+        instalock_worker=instalock_worker,
+        riot_client=client,
+        board_provider=ws_state_provider,
+        remote_controller=remote_controller,
+    )
     _COMMAND_ROUTER = router
     remote_controller.attach_router(router)
 
     try:
-        token = ws_server.start(board_provider=ws_state_provider, command_router=router,
-                                frontend_url=frontend_url, ws_port=ws_port,
-                                remote_controller=remote_controller,
-                                request_handler=handle_data_request,
-                                backend_port=int(os.getenv("BACKEND_PORT",
-                                                           os.getenv("PORT", "5000"))))
+        token = ws_server.start(
+            board_provider=ws_state_provider,
+            command_router=router,
+            frontend_url=frontend_url,
+            ws_port=ws_port,
+            remote_controller=remote_controller,
+            request_handler=handle_data_request,
+            backend_port=int(os.getenv("BACKEND_PORT", os.getenv("PORT", "5000"))),
+        )
     except Exception as e:
         app.logger.exception("VS-WS-001 WebSocket bridge failed to start")
         print(f"[app] VS-WS-001 WebSocket bridge failed: {e}", flush=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from e
     _write_bridge_file(ws_port, token)
+
 
 def _write_bridge_file(ws_port: int, token: str) -> None:
     import tempfile
+
     import ws_server
+
     try:
         scout_dir = scoutlog.SCOUT_DIR
         scout_dir.mkdir(exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(scout_dir), prefix=".bridge-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"wsPort": ws_port, "token": token,
-                           "protocol": ws_server.PROTOCOL_VERSION,
-                           "pid": os.getpid()}, fh)
+                json.dump(
+                    {
+                        "wsPort": ws_port,
+                        "token": token,
+                        "protocol": ws_server.PROTOCOL_VERSION,
+                        "pid": os.getpid(),
+                    },
+                    fh,
+                )
             os.replace(tmp, str(scout_dir / "bridge.json"))
         finally:
             if os.path.exists(tmp):
@@ -851,6 +983,7 @@ def _write_bridge_file(ws_port: int, token: str) -> None:
     except Exception:
         app.logger.exception("bridge.json write failed — CLI bridge unavailable")
 
+
 if __name__ == "__main__":
     port = int(os.getenv("BACKEND_PORT", os.getenv("PORT", "5000")))
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
@@ -859,12 +992,14 @@ if __name__ == "__main__":
 
     if not debug or os.getenv("WERKZEUG_RUN_MAIN") == "true":
         _start_ws_bridge()
-    print(f"[app] Valorant Scout API on http://127.0.0.1:{port}  "
-          f"(source={client.source_pref}, key={'set' if client.api_key else 'unset'})",
-          flush=True)
+    print(
+        f"[app] Valorant Scout API on http://127.0.0.1:{port}  "
+        f"(source={client.source_pref}, key={'set' if client.api_key else 'unset'})",
+        flush=True,
+    )
     try:
         app.run(host="127.0.0.1", port=port, debug=debug)
     except OSError as e:
         app.logger.error("VS-BACKEND-001 could not bind 127.0.0.1:%s: %s", port, e)
         print(f"[app] VS-BACKEND-001 could not bind 127.0.0.1:{port}: {e}", flush=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from e

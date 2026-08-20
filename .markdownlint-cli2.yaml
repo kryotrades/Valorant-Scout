@@ -1,0 +1,49 @@
+---
+# markdownlint — all rules on except the ones below, each with its reason.
+config:
+  default: true
+
+  # Prose reflows badly under a hard wrap and GitHub soft-wraps everything the
+  # README is read in.
+  MD013: false
+
+  # Table pipe padding is invisible in every renderer. Enforcing it produces
+  # large diffs that change nothing a reader sees.
+  MD060: false
+
+  # The README opens with a centred <div>, badges and screenshot <img> tags.
+  # That is what a project front page looks like on GitHub.
+  MD033:
+    allowed_elements: [div, p, br, img, a, sub, sup, kbd, details, summary,
+                       strong, em, h1, h2, h3]
+
+  # The feature list and the deep-dive sections deliberately repeat headings
+  # ("Terminal CLI" as a feature, then as a section). Only sibling duplicates
+  # are a real problem.
+  MD024: {siblings_only: true}
+
+  # The README opens with a centred banner div; its H1 is inside. Requiring the
+  # very first line to be a heading would mean deleting the banner.
+  MD041: false
+
+  # markdownlint's slugger keeps the emoji variation selector (U+FE0F) in an
+  # anchor; GitHub's drops it. So "🖼️ Screens" is #-screens on GitHub and
+  # #%EF%B8%8F-screens here, and every nav link to a heading whose emoji carries
+  # a variation selector reads as broken when it is not. Verified by reducing it
+  # to a three-heading file: "✨ Features" (no selector) passes, "🖼️ Screens"
+  # and "⌨️ Terminal CLI" do not.
+  #
+  # The one link that WAS broken — #-quick-start pointing at a heading with a
+  # parenthetical after it — is fixed rather than hidden. Recheck the nav bar by
+  # hand when a heading changes; nothing here can do it.
+  MD051: false
+
+  MD046: {style: fenced}
+
+globs:
+  - "**/*.md"
+
+ignores:
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/dist/**"

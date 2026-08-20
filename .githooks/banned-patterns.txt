@@ -1,0 +1,20 @@
+# Attribution patterns that must never appear in a commit message, a commit
+# trailer, a branch name, a tag or a tracked file. One .NET regex per line,
+# matched case-insensitively.
+#
+# Each line is matched twice: once as written, against the raw text, and once
+# with every non-alphanumeric character stripped from BOTH the pattern and the
+# text, which is what catches c-l-a-u-d-e and C.L.A.U.D.E. A line carrying
+# regex syntax survives only the first pass, so keep the syntax to a minimum.
+# This file is excluded from the scan it drives, or it would flag itself.
+co-authored-by:
+generated[ -]with
+assisted[ -]by[ -]a?i
+claude
+anthropic
+openai
+chatgpt
+copilot
+cursor\.(sh|com)
+\bllm\b
+🤖

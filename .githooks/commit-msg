@@ -1,0 +1,4 @@
+#!/bin/sh
+# git runs hooks through its bundled sh. Everything this repository does is
+# PowerShell, so the hook itself is three lines and the policy lives next door.
+exec powershell -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/.githooks/commit-msg.ps1" "$@"

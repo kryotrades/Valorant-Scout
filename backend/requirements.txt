@@ -14,7 +14,8 @@ pypresence==4.6.1      # Discord Rich Presence (optional; degrades if Discord/li
 websockets==13.1       # local WebSocket bridge for the hosted frontend
 ably==2.0.12           # remote/phone mode over Ably (optional; local mode works without it)
 valclient==2.28        # local Riot client API (career/match-history endpoints)
-cryptography==49.0.0   # offline-mode: convert Deceive's PKCS#12 chat cert -> PEM
+cryptography==50.0.0   # offline-mode: convert Deceive's PKCS#12 chat cert -> PEM
+tzdata==2026.3         # Windows ships no tz database; zoneinfo needs this one
 
 # --- transitive dependencies ---
 # pip installs these anyway; pinned so the resolver can't swap in a new version
@@ -29,8 +30,8 @@ click==8.4.1
 colorama==0.4.6
 pycparser==2.22        # via cffi
 h11==0.16.0
-h2==4.3.0
-hpack==4.1.0
+h2==4.4.1
+hpack==4.2.0
 httpcore==1.0.9
 httpx==0.28.1
 hyperframe==6.1.0
@@ -41,7 +42,7 @@ markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
 methoddispatch==3.0.2
-msgpack==1.1.2
+msgpack==1.2.1
 pyee==12.1.1
 Pygments==2.20.0
 typing_extensions==4.15.0

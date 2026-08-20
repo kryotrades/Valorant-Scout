@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Any
 
 from agents import resolve_agent, role_of
 
-def _blank_stat():
+
+def _blank_stat() -> dict[str, int]:
     return {"times": 0, "wins": 0, "kills": 0, "deaths": 0, "assists": 0}
 
-def recommend(matches: list[dict]) -> dict:
-    pass
-    by_agent: dict[str, dict] = defaultdict(_blank_stat)
-    by_map_agent: dict[str, dict] = defaultdict(lambda: defaultdict(int))
-    by_role_agent: dict[str, dict] = defaultdict(lambda: defaultdict(int))
+
+def recommend(matches: list[dict[str, Any]]) -> dict[str, Any]:
+    by_agent: dict[str, dict[str, Any]] = defaultdict(_blank_stat)
+    by_map_agent: dict[str, dict[str, Any]] = defaultdict(lambda: defaultdict(int))
+    by_role_agent: dict[str, dict[str, Any]] = defaultdict(lambda: defaultdict(int))
 
     for m in matches:
         agent = m.get("agent")
@@ -30,12 +32,18 @@ def recommend(matches: list[dict]) -> dict:
 
     if not by_agent:
         return {
-            "agent": None, "agentId": None, "role": None, "times": 0,
-            "winRate": 0, "portrait": None, "perMap": {}, "perRole": {},
+            "agent": None,
+            "agentId": None,
+            "role": None,
+            "times": 0,
+            "winRate": 0,
+            "portrait": None,
+            "perMap": {},
+            "perRole": {},
             "breakdown": [],
         }
 
-    def win_rate(stat):
+    def win_rate(stat: dict[str, int]) -> float:
         return round(100 * stat["wins"] / stat["times"], 1) if stat["times"] else 0.0
 
     ranked = sorted(
@@ -51,24 +59,24 @@ def recommend(matches: list[dict]) -> dict:
     for name, stat in ranked:
         meta = resolve_agent(name) or {}
         kd = round(stat["kills"] / stat["deaths"], 2) if stat["deaths"] else float(stat["kills"])
-        breakdown.append({
-            "agent": name,
-            "role": meta.get("role", "Flex"),
-            "times": stat["times"],
-            "winRate": win_rate(stat),
-            "kd": kd,
-            "color": meta.get("color", "#FF4655"),
-            "portrait": meta.get("portrait"),
-        })
+        breakdown.append(
+            {
+                "agent": name,
+                "role": meta.get("role", "Flex"),
+                "times": stat["times"],
+                "winRate": win_rate(stat),
+                "kd": kd,
+                "color": meta.get("color", "#FF4655"),
+                "portrait": meta.get("portrait"),
+            }
+        )
 
-    per_map = {
-        mp: (lambda a: {"agent": a[0], "times": a[1]})(max(counts.items(), key=lambda kv: kv[1]))
-        for mp, counts in by_map_agent.items()
-    }
-    per_role = {
-        role: (lambda a: {"agent": a[0], "times": a[1]})(max(counts.items(), key=lambda kv: kv[1]))
-        for role, counts in by_role_agent.items()
-    }
+    def _most_picked(counts: dict[str, int]) -> dict[str, Any]:
+        agent, times = max(counts.items(), key=lambda kv: kv[1])
+        return {"agent": agent, "times": times}
+
+    per_map = {mp: _most_picked(counts) for mp, counts in by_map_agent.items()}
+    per_role = {role: _most_picked(counts) for role, counts in by_role_agent.items()}
 
     return {
         "agent": top_name,

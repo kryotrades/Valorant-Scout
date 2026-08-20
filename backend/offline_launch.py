@@ -5,16 +5,20 @@ import base64
 import codecs
 import json
 import os
+import re
+import secrets
 import ssl
 import subprocess
 import sys
 import threading
 import time
-import re
-import secrets
 import urllib.parse
 import urllib.request
 import uuid
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import requests
 
@@ -25,12 +29,12 @@ RIOT_CONFIG_URL = "https://clientconfig.rpg.riotgames.com"
 
 GEO_PAS_URL = "https://riot-geo.pas.si.riotgames.com/pas/v1/service/chat"
 
-CERT_URL = os.getenv(
-    "SCOUT_OFFLINE_CERT_URL", "https://mln.cx/deceive/localhost.pfx"
-)
+CERT_URL = os.getenv("SCOUT_OFFLINE_CERT_URL", "https://mln.cx/deceive/localhost.pfx")
 _CACHED_CERT = os.path.join(
     os.getenv("LOCALAPPDATA", os.path.expanduser("~")),
-    "ValorantScout", "offline", "chat.pem",
+    "ValorantScout",
+    "offline",
+    "chat.pem",
 )
 _CERT_CACHE_TTL = 7 * 86400
 
@@ -41,12 +45,15 @@ CERT_PATH = os.getenv(
 
 RIOT_INSTALLS = os.path.join(
     os.getenv("PROGRAMDATA", r"C:\ProgramData"),
-    "Riot Games", "RiotClientInstalls.json",
+    "Riot Games",
+    "RiotClientInstalls.json",
 )
 
 _LOG_PATH = os.path.join(
     os.getenv("LOCALAPPDATA", os.path.expanduser("~")),
-    "ValorantScout", "offline", "engine.log",
+    "ValorantScout",
+    "offline",
+    "engine.log",
 )
 
 
@@ -54,7 +61,7 @@ _HTTP_SESSION = None
 _HTTP_LOCK = threading.Lock()
 
 
-def _http():
+def _http() -> requests.Session:
     global _HTTP_SESSION
     with _HTTP_LOCK:
         if _HTTP_SESSION is None:
@@ -88,7 +95,9 @@ _VALID_STATUS = ("online", "offline", "away", "mobile")
 _DEFAULT_STATUS = "offline"
 _STATUS_PATH = os.path.join(
     os.getenv("LOCALAPPDATA", os.path.expanduser("~")),
-    "ValorantScout", "offline", "status",
+    "ValorantScout",
+    "offline",
+    "status",
 )
 
 _HELPER_PROTOCOL = 1
@@ -97,7 +106,9 @@ _HELPER_STATE_PATH = os.getenv(
     "SCOUT_OFFLINE_HELPER_STATE",
     os.path.join(
         os.getenv("LOCALAPPDATA", os.path.expanduser("~")),
-        "ValorantScout", "offline", "helper.json",
+        "ValorantScout",
+        "offline",
+        "helper.json",
     ),
 )
 _HELPER_START_LOCK = threading.Lock()
@@ -105,7 +116,8 @@ _HELPER_START_LOCK = threading.Lock()
 
 def _load_status() -> str:
     try:
-        s = open(_STATUS_PATH, encoding="utf-8").read().strip().lower()
+        with open(_STATUS_PATH, encoding="utf-8") as fh:
+            s = fh.read().strip().lower()
         return s if s in _VALID_STATUS else _DEFAULT_STATUS
     except Exception:
         return _DEFAULT_STATUS
@@ -132,6 +144,7 @@ def _status_line(status: str) -> str:
         "mobile": "You're now appearing on MOBILE to your friends.",
     }.get(status, f"You're now appearing {status}.")
 
+
 _RIOT_PROCS = [
     "RiotClientServices.exe",
     "VALORANT.exe",
@@ -141,7 +154,12 @@ _RIOT_PROCS = [
 
 
 _GAME_ELEMENTS = (
-    "valorant", "league_of_legends", "bacon", "lion", "keystone", "riot_client",
+    "valorant",
+    "league_of_legends",
+    "bacon",
+    "lion",
+    "keystone",
+    "riot_client",
 )
 
 
@@ -155,8 +173,7 @@ def _rewrite_presence(xml_text: str, target: str = "offline") -> str:
 
     s = xml_text
     if "<show>" in s:
-        s = re.sub(r"<show>.*?</show>", f"<show>{target}</show>", s,
-                   count=1, flags=re.DOTALL)
+        s = re.sub(r"<show>.*?</show>", f"<show>{target}</show>", s, count=1, flags=re.DOTALL)
     else:
         s = re.sub(r"<show\s*/>", f"<show>{target}</show>", s, count=1)
     s = re.sub(r"<status>.*?</status>", "", s, flags=re.DOTALL)
@@ -173,14 +190,19 @@ def _is_directed(stanza: str) -> bool:
     return bool(re.search(r"\bto=", stanza[: stanza.find(">") + 1]))
 
 
-def process_c2s(buf: str, target: str = "offline", on_presence=None, rewrite: bool = True):
+def process_c2s(
+    buf: str,
+    target: str = "offline",
+    on_presence: Callable[[str], None] | None = None,
+    rewrite: bool = True,
+) -> tuple[str, str]:
     out = []
     i = 0
     while True:
         start = buf.find("<presence", i)
         if start == -1:
             tail = _pending_prefix(buf, i)
-            out.append(buf[i:len(buf) - len(tail)])
+            out.append(buf[i : len(buf) - len(tail)])
             return "".join(out), tail
         out.append(buf[i:start])
         end = _presence_end(buf, start)
@@ -211,7 +233,7 @@ def _presence_end(buf: str, start: int) -> int:
 
 def _pending_prefix(buf: str, i: int) -> str:
     tag = "<presence"
-    tail = buf[max(i, len(buf) - len(tag)):]
+    tail = buf[max(i, len(buf) - len(tag)) :]
     for k in range(len(tail), 0, -1):
         if tag.startswith(tail[-k:]):
             return tail[-k:]
@@ -225,14 +247,15 @@ _FAKE_RES = "RC-Scout"
 _ROSTER_MARKER = b"<query xmlns='jabber:iq:riotgames:roster'>"
 
 _FAKE_ROSTER_ITEM = (
-    f"<item jid='{_FAKE_JID}' name='&#9;Valorant Scout Active' subscription='both' puuid='{_FAKE_PUUID}'>"
+    f"<item jid='{_FAKE_JID}' name='&#9;Valorant Scout Active' "
+    f"subscription='both' puuid='{_FAKE_PUUID}'>"
     "<group priority='9999'>Valorant Scout</group>"
     "<state>online</state>"
     "<id name='&#9;Valorant Scout Active' tagline='OFFLINE'/>"
     "<lol name='&#9;Valorant Scout Active'/>"
     "<platforms><riot name='&#9;Valorant Scout Active' tagline='OFFLINE'/></platforms>"
     "</item>"
-).encode("utf-8")
+).encode()
 
 
 def inject_fake_roster(data: bytes) -> bytes | None:
@@ -264,8 +287,7 @@ def strip_fake_stanzas(text: str) -> str:
 
 
 def _extract_valorant_version(text: str) -> str | None:
-    m = re.search(r"<valorant\b[^>]*>.*?<p>([A-Za-z0-9+/=]+)</p>.*?</valorant>",
-                  text, re.DOTALL)
+    m = re.search(r"<valorant\b[^>]*>.*?<p>([A-Za-z0-9+/=]+)</p>.*?</valorant>", text, re.DOTALL)
     if not m:
         return None
     try:
@@ -276,9 +298,10 @@ def _extract_valorant_version(text: str) -> str | None:
         return None
 
 
-def _extract_valorant_private(text: str) -> dict | None:
-    m = re.search(r"<valorant\b[^>]*>.*?<p>([A-Za-z0-9+/=]+)</p>.*?</valorant>",
-                  text or "", re.DOTALL)
+def _extract_valorant_private(text: str) -> dict[str, Any] | None:
+    m = re.search(
+        r"<valorant\b[^>]*>.*?<p>([A-Za-z0-9+/=]+)</p>.*?</valorant>", text or "", re.DOTALL
+    )
     if not m:
         return None
     try:
@@ -288,48 +311,72 @@ def _extract_valorant_private(text: str) -> dict | None:
         return None
 
 
-def _fake_presence(version: str | None = None,
-                   status: str = _DEFAULT_STATUS) -> bytes:
+def _fake_presence(version: str | None = None, status: str = _DEFAULT_STATUS) -> bytes:
     ts = int(time.time() * 1000)
-    val = base64.b64encode(json.dumps({
-        "isValid": True, "isIdle": False, "queueId": "competitive",
-        "provisioningFlow": "Invalid",
-        "partyId": "00000000-0000-0000-0000-000000000000",
-        "partySize": 1, "maxPartySize": 5,
-        "partyOwnerMatchScoreAllyTeam": 0, "partyOwnerMatchScoreEnemyTeam": 0,
-        "premierPresenceData": {
-            "rosterId": "",
-            "rosterName": _roster_name(status),
-            "rosterTag": "Scout Active", "rosterType": "VCT",
-            "division": 0, "score": 0, "plating": 0,
-            "showAura": False, "showTag": True, "showPlating": False,
-        },
-        "matchPresenceData": {
-            "sessionLoopState": "MENUS", "provisioningFlow": "Invalid",
-            "matchMap": "", "queueId": "competitive",
-        },
-        "partyPresenceData": {
-            "partyId": "00000000-0000-0000-0000-000000000000",
-            "isPartyOwner": True, "partyState": "DEFAULT",
-            "partyAccessibility": "CLOSED", "partyLFM": False,
-            "partyClientVersion": version or "unknown",
-            "partyVersion": ts,
-            "partySize": 1, "maxPartySize": 5,
-            "queueEntryTime": "0001.01.01-00.00.00",
-            "isPartyCrossPlayEnabled": False, "isPlayerCrossPlayEnabled": False,
-            "partyPrecisePlatformTypes": 1,
-            "customGameName": "Valorant Scout Active", "customGameTeam": "",
-            "tournamentId": "", "rosterId": "",
-            "partyOwnerSessionLoopState": "MENUS",
-            "partyOwnerMatchMap": "", "partyOwnerProvisioningFlow": "Invalid",
-            "partyOwnerMatchScoreAllyTeam": 0, "partyOwnerMatchScoreEnemyTeam": 0,
-        },
-        "playerPresenceData": {
-            "playerCardId": "d93ad22d-4db7-b6bc-5e9c-e5959bb9dd76",
-            "playerTitleId": "e3ca05a4-4e44-9afe-3791-7d96ca8f71fa",
-            "accountLevel": 999, "competitiveTier": 27, "leaderboardPosition": 1,
-        },
-    }).encode("utf-8")).decode("ascii")
+    val = base64.b64encode(
+        json.dumps(
+            {
+                "isValid": True,
+                "isIdle": False,
+                "queueId": "competitive",
+                "provisioningFlow": "Invalid",
+                "partyId": "00000000-0000-0000-0000-000000000000",
+                "partySize": 1,
+                "maxPartySize": 5,
+                "partyOwnerMatchScoreAllyTeam": 0,
+                "partyOwnerMatchScoreEnemyTeam": 0,
+                "premierPresenceData": {
+                    "rosterId": "",
+                    "rosterName": _roster_name(status),
+                    "rosterTag": "Scout Active",
+                    "rosterType": "VCT",
+                    "division": 0,
+                    "score": 0,
+                    "plating": 0,
+                    "showAura": False,
+                    "showTag": True,
+                    "showPlating": False,
+                },
+                "matchPresenceData": {
+                    "sessionLoopState": "MENUS",
+                    "provisioningFlow": "Invalid",
+                    "matchMap": "",
+                    "queueId": "competitive",
+                },
+                "partyPresenceData": {
+                    "partyId": "00000000-0000-0000-0000-000000000000",
+                    "isPartyOwner": True,
+                    "partyState": "DEFAULT",
+                    "partyAccessibility": "CLOSED",
+                    "partyLFM": False,
+                    "partyClientVersion": version or "unknown",
+                    "partyVersion": ts,
+                    "partySize": 1,
+                    "maxPartySize": 5,
+                    "queueEntryTime": "0001.01.01-00.00.00",
+                    "isPartyCrossPlayEnabled": False,
+                    "isPlayerCrossPlayEnabled": False,
+                    "partyPrecisePlatformTypes": 1,
+                    "customGameName": "Valorant Scout Active",
+                    "customGameTeam": "",
+                    "tournamentId": "",
+                    "rosterId": "",
+                    "partyOwnerSessionLoopState": "MENUS",
+                    "partyOwnerMatchMap": "",
+                    "partyOwnerProvisioningFlow": "Invalid",
+                    "partyOwnerMatchScoreAllyTeam": 0,
+                    "partyOwnerMatchScoreEnemyTeam": 0,
+                },
+                "playerPresenceData": {
+                    "playerCardId": "d93ad22d-4db7-b6bc-5e9c-e5959bb9dd76",
+                    "playerTitleId": "e3ca05a4-4e44-9afe-3791-7d96ca8f71fa",
+                    "accountLevel": 999,
+                    "competitiveTier": 27,
+                    "leaderboardPosition": 1,
+                },
+            }
+        ).encode("utf-8")
+    ).decode("ascii")
     sid = uuid.uuid4()
     return (
         f"<presence from='{_FAKE_JID}/{_FAKE_RES}' id='b-{sid}'>"
@@ -344,7 +391,7 @@ def _fake_presence(version: str | None = None,
         "</games>"
         "<show>chat</show><platform>riot</platform><status/>"
         "</presence>"
-    ).encode("utf-8")
+    ).encode()
 
 
 def _fake_message(text: str) -> bytes:
@@ -352,7 +399,7 @@ def _fake_message(text: str) -> bytes:
     return (
         f"<message from='{_FAKE_JID}/{_FAKE_RES}' stamp='{stamp}' "
         f"id='scout-{uuid.uuid4()}' type='chat'><body>{text}</body></message>"
-    ).encode("utf-8")
+    ).encode()
 
 
 def find_riot_client() -> str | None:
@@ -373,21 +420,20 @@ def kill_riot() -> None:
         try:
             subprocess.run(
                 ["taskkill", "/F", "/IM", name],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception:
             pass
 
 
-def _hidden_riot_process_kwargs() -> dict:
+def _hidden_riot_process_kwargs() -> dict[str, Any]:
     kwargs = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
-    if not sys.platform.startswith("win"):
-        return kwargs
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if flags:
         kwargs["creationflags"] = flags
@@ -410,14 +456,18 @@ def _fetch_cert() -> bool:
         return False
     try:
         from cryptography.hazmat.primitives.serialization import (
-            pkcs12, Encoding, PrivateFormat, NoEncryption,
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            pkcs12,
         )
+
         key, cert, extra = pkcs12.load_key_and_certificates(pfx, None)
         if key is None or cert is None:
             _dbg("cert: pfx missing key or leaf cert; ignoring")
             return False
         pem = cert.public_bytes(Encoding.PEM)
-        for c in (extra or []):
+        for c in extra or []:
             pem += c.public_bytes(Encoding.PEM)
         pem += key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
     except Exception as e:
@@ -454,9 +504,11 @@ def ensure_cert() -> str:
         _dbg("cert: fetch failed — using stale cached trusted cert")
         return _CACHED_CERT
     if os.path.isfile(CERT_PATH) and os.path.getsize(CERT_PATH) > 0:
-        _dbg("cert: WARNING no trusted cert available; using bundled self-signed. "
-             "The Riot client will REJECT this — check network access to "
-             f"{CERT_URL} (Deceive's cert host).")
+        _dbg(
+            "cert: WARNING no trusted cert available; using bundled self-signed. "
+            "The Riot client will REJECT this — check network access to "
+            f"{CERT_URL} (Deceive's cert host)."
+        )
         return CERT_PATH
     raise RuntimeError(
         f"No offline-mode cert available: fetch from {CERT_URL} failed and no cache "
@@ -471,14 +523,14 @@ class _Target:
 
 
 class _Conn:
-    def __init__(self, client_writer, up_writer):
+    def __init__(self, client_writer: Any, up_writer: Any) -> None:
         self.client_writer = client_writer
         self.up_writer = up_writer
         self.version: str | None = None
         self.inserted = False
         self.presence_sent = False
         self.last_presence: str | None = None
-        self.last_private: dict | None = None
+        self.last_private: dict[str, Any] | None = None
         self.captured_at = 0.0
 
     def capture(self, raw: str) -> None:
@@ -490,20 +542,22 @@ class _Conn:
 
 
 class _Engine:
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self.started = False
-        self.config_port = None
+        self.config_port: int | None = None
         self.chat_port = None
         self.target = _Target()
-        self._loop = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self.status = _DEFAULT_STATUS
         self.connected = False
         self.friends_loaded = False
         self._conns: list[_Conn] = []
+        # asyncio only holds a weak reference to a running task, so a greeting
+        # left un-referenced can be collected mid-await and simply never arrive.
+        self._greet_tasks: set[Any] = set()
 
-
-    def start(self):
+    def start(self) -> None:
         with self._lock:
             if self.started:
                 return
@@ -516,18 +570,19 @@ class _Engine:
             self._start_chat(cert)
             self._start_config()
             self.started = True
-            _dbg(f"engine started: config_port={self.config_port} "
-                 f"chat_port={self.chat_port}", echo=True)
+            _dbg(
+                f"engine started: config_port={self.config_port} chat_port={self.chat_port}",
+                echo=True,
+            )
 
-
-    def _start_chat(self, cert: str):
+    def _start_chat(self, cert: str) -> None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert)
         loop = asyncio.new_event_loop()
         self._loop = loop
         ready = threading.Event()
 
-        def run():
+        def run() -> None:
             asyncio.set_event_loop(loop)
             server = loop.run_until_complete(
                 asyncio.start_server(self._handle_chat, "127.0.0.1", 0, ssl=ctx)
@@ -540,7 +595,7 @@ class _Engine:
         if not ready.wait(10):
             raise RuntimeError("offline chat proxy failed to bind")
 
-    async def _handle_chat(self, c_reader, c_writer):
+    async def _handle_chat(self, c_reader: Any, c_writer: Any) -> None:
         host, port = self.target.host, self.target.port
         _dbg(f"chat: client connected, relaying to upstream {host}:{port}", echo=True)
         if not host:
@@ -577,7 +632,7 @@ class _Engine:
             except Exception:
                 pass
 
-    async def _pump_c2s(self, reader, writer, conn):
+    async def _pump_c2s(self, reader: Any, writer: Any, conn: _Conn) -> None:
         dec = codecs.getincrementaldecoder("utf-8")()
         buf = ""
         while True:
@@ -600,8 +655,12 @@ class _Engine:
                         await self._send_fake_presence(conn)
             buf += chunk
             hide = self.status != "online"
-            out, buf = process_c2s(buf, target=self.status if hide else "offline",
-                                   on_presence=conn.capture, rewrite=hide)
+            out, buf = process_c2s(
+                buf,
+                target=self.status if hide else "offline",
+                on_presence=conn.capture,
+                rewrite=hide,
+            )
             if out:
                 writer.write(out.encode("utf-8"))
                 await writer.drain()
@@ -611,7 +670,7 @@ class _Engine:
             writer.write(buf.encode("utf-8"))
             await writer.drain()
 
-    async def _pump_s2c(self, reader, writer, conn):
+    async def _pump_s2c(self, reader: Any, writer: Any, conn: _Conn) -> None:
         while True:
             data = await reader.read(65536)
             if not data:
@@ -624,12 +683,14 @@ class _Engine:
                     writer.write(hacked)
                     await writer.drain()
                     _dbg("s2c: injected fake 'Valorant Scout Active' friend", echo=True)
-                    asyncio.create_task(self._greet_later(conn))
+                    greet = asyncio.create_task(self._greet_later(conn))
+                    self._greet_tasks.add(greet)
+                    greet.add_done_callback(self._greet_tasks.discard)
                     continue
             writer.write(data)
             await writer.drain()
 
-    async def _send_fake_presence(self, conn):
+    async def _send_fake_presence(self, conn: _Conn) -> None:
         conn.presence_sent = True
         try:
             conn.client_writer.write(_fake_presence(conn.version, self.status))
@@ -637,19 +698,21 @@ class _Engine:
         except Exception:
             pass
 
-    async def _greet_later(self, conn):
+    async def _greet_later(self, conn: _Conn) -> None:
         try:
             await asyncio.sleep(6)
-            conn.client_writer.write(_fake_message(
-                f"Valorant Scout is active — friends see you as {self.status.upper()}. "
-                "Message me 'online', 'offline', 'away' or 'mobile' to switch "
-                "anytime (or use the Scout app / website)."))
+            conn.client_writer.write(
+                _fake_message(
+                    f"Valorant Scout is active — friends see you as {self.status.upper()}. "
+                    "Message me 'online', 'offline', 'away' or 'mobile' to switch "
+                    "anytime (or use the Scout app / website)."
+                )
+            )
             await conn.client_writer.drain()
         except Exception:
             pass
 
-
-    def set_status(self, status: str) -> dict:
+    def set_status(self, status: str) -> dict[str, Any]:
         status = (status or "").strip().lower()
         if status not in _VALID_STATUS:
             return {"ok": False, "message": f"Unknown status '{status}'."}
@@ -659,19 +722,18 @@ class _Engine:
         self._push_status()
         return {"ok": True, "status": status, "enabled": status != "online"}
 
-    def set_enabled(self, enabled: bool) -> dict:
+    def set_enabled(self, enabled: bool) -> dict[str, Any]:
         if enabled:
             target = self.status if self.status != "online" else _load_status()
             return self.set_status(target if target != "online" else _DEFAULT_STATUS)
         return self.set_status("online")
 
-    def _push_status(self):
+    def _push_status(self) -> None:
         if self._loop is not None:
             for conn in list(self._conns):
-                asyncio.run_coroutine_threadsafe(
-                    self._resend_presence(conn), self._loop)
+                asyncio.run_coroutine_threadsafe(self._resend_presence(conn), self._loop)
 
-    async def _resend_presence(self, conn):
+    async def _resend_presence(self, conn: _Conn) -> None:
         try:
             raw = conn.last_presence
             if raw:
@@ -685,7 +747,7 @@ class _Engine:
         except Exception:
             pass
 
-    async def _handle_fake_command(self, chunk: str, conn):
+    async def _handle_fake_command(self, chunk: str, conn: _Conn) -> None:
         m = re.search(r"<body>(.*?)</body>", chunk, re.DOTALL)
         if not m:
             return
@@ -706,8 +768,7 @@ class _Engine:
         except Exception:
             pass
 
-
-    def _start_config(self):
+    def _start_config(self) -> None:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         engine = self
@@ -715,18 +776,17 @@ class _Engine:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def log_message(self, *_):
+            def log_message(self, *_: Any) -> None:
                 pass
 
-            def do_GET(self):
+            def do_GET(self) -> None:
                 fwd = {}
                 for h in ("Authorization", "X-Riot-Entitlements-JWT", "User-Agent"):
                     if h in self.headers:
                         fwd[h] = self.headers[h]
                 _dbg(f"config: GET {self.path[:80]} (auth={'Authorization' in fwd})")
                 try:
-                    up = _http().get(RIOT_CONFIG_URL + self.path,
-                                     headers=fwd, timeout=20)
+                    up = _http().get(RIOT_CONFIG_URL + self.path, headers=fwd, timeout=20)
                 except Exception:
                     self.send_error(502)
                     return
@@ -746,10 +806,9 @@ class _Engine:
 
         srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.config_port = srv.server_address[1]
-        threading.Thread(target=srv.serve_forever,
-                         name="offline-config", daemon=True).start()
+        threading.Thread(target=srv.serve_forever, name="offline-config", daemon=True).start()
 
-    def _rewrite_config(self, cfg: dict, auth: str | None = None) -> dict:
+    def _rewrite_config(self, cfg: dict[str, Any], auth: str | None = None) -> dict[str, Any]:
         if not isinstance(cfg, dict):
             return cfg
         host = cfg.get("chat.host")
@@ -763,16 +822,15 @@ class _Engine:
             cfg["chat.port"] = self.chat_port
         aff = cfg.get("chat.affinities")
         if isinstance(aff, dict):
-            if cfg.get("chat.affinity.enabled") and auth \
-                    and not self.target.affinity_resolved:
+            if cfg.get("chat.affinity.enabled") and auth and not self.target.affinity_resolved:
                 resolved = self._resolve_affinity_host(aff, auth)
                 if resolved:
                     self.target.host = resolved
                     self.target.affinity_resolved = True
-            cfg["chat.affinities"] = {k: CHAT_DOMAIN for k in aff}
+            cfg["chat.affinities"] = dict.fromkeys(aff, CHAT_DOMAIN)
         return cfg
 
-    def _resolve_affinity_host(self, affinities: dict, auth: str) -> str | None:
+    def _resolve_affinity_host(self, affinities: dict[str, Any], auth: str) -> str | None:
         try:
             r = _http().get(GEO_PAS_URL, headers={"Authorization": auth}, timeout=15)
             payload = r.text.split(".")[1]
@@ -790,14 +848,16 @@ class _Engine:
 _engine = _Engine()
 
 
-def _read_helper_info() -> dict | None:
+def _read_helper_info() -> dict[str, Any] | None:
     try:
         with open(_HELPER_STATE_PATH, encoding="utf-8") as f:
             info = json.load(f)
-        if (not isinstance(info, dict)
-                or info.get("protocol") != _HELPER_PROTOCOL
-                or not isinstance(info.get("port"), int)
-                or not info.get("token")):
+        if (
+            not isinstance(info, dict)
+            or info.get("protocol") != _HELPER_PROTOCOL
+            or not isinstance(info.get("port"), int)
+            or not info.get("token")
+        ):
             return None
         return info
     except (OSError, ValueError, TypeError):
@@ -836,16 +896,19 @@ def _write_helper_info(port: int, token: str) -> None:
             pass
 
 
-def _helper_request(command: str, payload: dict | None = None,
-                    timeout: float = 3.0) -> dict | None:
+def _helper_request(
+    command: str, payload: dict[str, Any] | None = None, timeout: float = 3.0
+) -> dict[str, Any] | None:
     info = _read_helper_info()
     if not info:
         return None
-    body = json.dumps({
-        "token": info["token"],
-        "command": command,
-        "payload": payload or {},
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "token": info["token"],
+            "command": command,
+            "payload": payload or {},
+        }
+    ).encode("utf-8")
     request = urllib.request.Request(
         f"http://127.0.0.1:{info['port']}/control",
         data=body,
@@ -860,17 +923,13 @@ def _helper_request(command: str, payload: dict | None = None,
         return None
 
 
-def _hidden_helper_process_kwargs(*, detached: bool = False) -> dict:
+def _hidden_helper_process_kwargs() -> dict[str, Any]:
     kwargs = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
     }
-    if not sys.platform.startswith("win"):
-        if detached:
-            kwargs["start_new_session"] = True
-        return kwargs
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if flags:
         kwargs["creationflags"] = flags
@@ -878,16 +937,15 @@ def _hidden_helper_process_kwargs(*, detached: bool = False) -> dict:
 
 
 def _helper_python_executable() -> str:
-    if not sys.platform.startswith("win"):
-        return sys.executable
+    # pythonw.exe so the broker does not flash a console window; a venv without
+    # it (an embedded or stripped install) falls back to the console build.
     candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     return candidate if os.path.isfile(candidate) else sys.executable
 
 
 def _spawn_helper_broker() -> None:
     subprocess.Popen(
-        [_helper_python_executable(), os.path.abspath(__file__),
-         "--offline-helper-broker"],
+        [_helper_python_executable(), os.path.abspath(__file__), "--offline-helper-broker"],
         cwd=os.path.dirname(os.path.abspath(__file__)),
         **_hidden_helper_process_kwargs(),
     )
@@ -898,11 +956,10 @@ def _broker_main() -> int:
     env["VALORANT_SCOUT_OFFLINE_HELPER"] = "1"
     try:
         subprocess.Popen(
-            [_helper_python_executable(), os.path.abspath(__file__),
-             "--offline-helper"],
+            [_helper_python_executable(), os.path.abspath(__file__), "--offline-helper"],
             cwd=os.path.dirname(os.path.abspath(__file__)),
             env=env,
-            **_hidden_helper_process_kwargs(detached=True),
+            **_hidden_helper_process_kwargs(),
         )
         return 0
     except Exception as e:
@@ -961,8 +1018,6 @@ def _windows_process_names() -> set[str]:
 
 
 def _riot_process_running() -> bool:
-    if not sys.platform.startswith("win"):
-        return bool(_engine._conns)
     try:
         names = _windows_process_names()
         return any(name.lower() in names for name in _RIOT_PROCS)
@@ -970,7 +1025,7 @@ def _riot_process_running() -> bool:
         return True
 
 
-def _helper_monitor(server) -> None:
+def _helper_monitor(server: Any) -> None:
     launched_at = time.monotonic()
     saw_riot = False
     gone_since = None
@@ -1000,10 +1055,10 @@ def _helper_main() -> int:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, *_):
+        def log_message(self, *_: Any) -> None:
             pass
 
-        def do_POST(self):
+        def do_POST(self) -> None:
             if self.path != "/control":
                 self.send_error(404)
                 return
@@ -1027,8 +1082,9 @@ def _helper_main() -> int:
                     result = {"private": _captured_presence_private_local()}
                 elif command == "shutdown":
                     result = {"ok": True}
-                    threading.Thread(target=server.shutdown,
-                                     name="offline-helper-stop", daemon=True).start()
+                    threading.Thread(
+                        target=server.shutdown, name="offline-helper-stop", daemon=True
+                    ).start()
                 else:
                     result = {"ok": False, "message": "Unknown helper command."}
                 body = json.dumps(result).encode("utf-8")
@@ -1048,8 +1104,9 @@ def _helper_main() -> int:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     _write_helper_info(server.server_address[1], token)
     _dbg(f"helper: ready pid={os.getpid()} port={server.server_address[1]}")
-    threading.Thread(target=_helper_monitor, args=(server,),
-                     name="offline-helper-monitor", daemon=True).start()
+    threading.Thread(
+        target=_helper_monitor, args=(server,), name="offline-helper-monitor", daemon=True
+    ).start()
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
@@ -1077,15 +1134,11 @@ def _ensure_helper() -> bool:
     return False
 
 
-def _launch_local(status_: str | None = None) -> dict:
+def _launch_local(status_: str | None = None) -> dict[str, Any]:
     _dbg(f"launch: requested (status={status_!r})", echo=True)
-    if not sys.platform.startswith("win"):
-        return {"ok": False, "message": "Offline mode is Windows-only."}
-
     rc = find_riot_client()
     if not rc:
-        return {"ok": False,
-                "message": "Couldn't find the Riot Client. Is VALORANT installed?"}
+        return {"ok": False, "message": "Couldn't find the Riot Client. Is VALORANT installed?"}
 
     s = (status_ or "").strip().lower()
     if s in _VALID_STATUS and s != "online":
@@ -1095,7 +1148,7 @@ def _launch_local(status_: str | None = None) -> dict:
         _engine.start()
     except Exception as e:
         return {"ok": False, "message": str(e)}
-    if s in _VALID_STATUS and s != "online" and _engine.status != s:
+    if s in _VALID_STATUS and s not in ("online", _engine.status):
         _engine.set_status(s)
 
     _dbg(f"launch: killing Riot, then starting {rc}", echo=True)
@@ -1104,7 +1157,7 @@ def _launch_local(status_: str | None = None) -> dict:
 
     args = [
         rc,
-        f'--client-config-url=http://127.0.0.1:{_engine.config_port}',
+        f"--client-config-url=http://127.0.0.1:{_engine.config_port}",
         "--launch-product=valorant",
         "--launch-patchline=live",
     ]
@@ -1114,28 +1167,31 @@ def _launch_local(status_: str | None = None) -> dict:
     except Exception as e:
         return {"ok": False, "message": f"Couldn't start the Riot Client: {e}"}
 
-    return {"ok": True,
-            "message": "Launching VALORANT in offline mode — sign in as usual. "
-                       f"Your friends will see you as {_engine.status}."}
+    return {
+        "ok": True,
+        "message": "Launching VALORANT in offline mode — sign in as usual. "
+        f"Your friends will see you as {_engine.status}.",
+    }
 
 
-def launch(status_: str | None = None) -> dict:
+def launch(status_: str | None = None) -> dict[str, Any]:
     if _HELPER_MODE:
         return _launch_local(status_)
     if not _ensure_helper():
-        return {"ok": False,
-                "message": "Couldn't start the offline-mode relay helper."}
-    return (_helper_request("launch", {"status": status_}, timeout=60.0)
-            or {"ok": False, "message": "Offline-mode relay stopped unexpectedly."})
+        return {"ok": False, "message": "Couldn't start the offline-mode relay helper."}
+    return _helper_request("launch", {"status": status_}, timeout=60.0) or {
+        "ok": False,
+        "message": "Offline-mode relay stopped unexpectedly.",
+    }
 
 
-def _set_enabled_local(enabled: bool) -> dict:
+def _set_enabled_local(enabled: bool) -> dict[str, Any]:
     if not _engine.started:
         return {"ok": False, "message": "Offline mode isn't running."}
     return _engine.set_enabled(enabled)
 
 
-def set_enabled(enabled: bool) -> dict:
+def set_enabled(enabled: bool) -> dict[str, Any]:
     if not _HELPER_MODE:
         remote = _helper_request("set_enabled", {"enabled": enabled})
         if remote is not None:
@@ -1143,13 +1199,13 @@ def set_enabled(enabled: bool) -> dict:
     return _set_enabled_local(enabled)
 
 
-def _set_status_local(status_: str) -> dict:
+def _set_status_local(status_: str) -> dict[str, Any]:
     if not _engine.started:
         return {"ok": False, "message": "Offline mode isn't running."}
     return _engine.set_status(status_)
 
 
-def set_status(status_: str) -> dict:
+def set_status(status_: str) -> dict[str, Any]:
     if not _HELPER_MODE:
         remote = _helper_request("set_status", {"status": status_})
         if remote is not None:
@@ -1157,20 +1213,22 @@ def set_status(status_: str) -> dict:
     return _set_status_local(status_)
 
 
-def _status_local() -> dict:
+def _status_local() -> dict[str, Any]:
     live = bool(_engine._conns)
     active = bool(_engine.connected and live)
-    return {"running": _engine.started,
-            "active": active,
-            "status": _engine.status,
-            "enabled": _engine.status != "online",
-            "connected": active,
-            "friendsLoaded": _engine.friends_loaded and live,
-            "configPort": _engine.config_port,
-            "chatPort": _engine.chat_port}
+    return {
+        "running": _engine.started,
+        "active": active,
+        "status": _engine.status,
+        "enabled": _engine.status != "online",
+        "connected": active,
+        "friendsLoaded": _engine.friends_loaded and live,
+        "configPort": _engine.config_port,
+        "chatPort": _engine.chat_port,
+    }
 
 
-def status() -> dict:
+def status() -> dict[str, Any]:
     if not _HELPER_MODE:
         remote = _helper_request("status")
         if remote is not None:
@@ -1178,7 +1236,7 @@ def status() -> dict:
     return _status_local()
 
 
-def _captured_presence_private_local() -> dict | None:
+def _captured_presence_private_local() -> dict[str, Any] | None:
     if not (_engine.connected and _engine._conns):
         return None
     conns = list(_engine._conns)
@@ -1186,10 +1244,10 @@ def _captured_presence_private_local() -> dict | None:
     if not candidates:
         return None
     newest = max(candidates, key=lambda c: c.captured_at)
-    return dict(newest.last_private)
+    return dict(newest.last_private or {})
 
 
-def captured_presence_private() -> dict | None:
+def captured_presence_private() -> dict[str, Any] | None:
     if not _HELPER_MODE:
         remote = _helper_request("presence")
         if remote is not None:
@@ -1205,10 +1263,12 @@ if __name__ == "__main__" and "--offline-helper" in sys.argv:
     raise SystemExit(_helper_main())
 
 if __name__ == "__main__":
-    p = ('<presence from="x"><show>chat</show><status>hi</status>'
-         '<games><valorant><st>in game</st><p>YWJj</p></valorant>'
-         '<league_of_legends><st>online</st></league_of_legends>'
-         '<keystone><st>online</st></keystone></games></presence>')
+    p = (
+        '<presence from="x"><show>chat</show><status>hi</status>'
+        "<games><valorant><st>in game</st><p>YWJj</p></valorant>"
+        "<league_of_legends><st>online</st></league_of_legends>"
+        "<keystone><st>online</st></keystone></games></presence>"
+    )
     out, rem = process_c2s(p)
     assert rem == "", rem
     assert "<valorant" not in out, out
@@ -1217,8 +1277,10 @@ if __name__ == "__main__":
     assert "<show>offline</show>" in out, out
     assert "<status" not in out, out
 
-    muc = ("<presence to='room@muc' from='x'><show>chat</show>"
-           "<games><valorant><st>x</st></valorant></games></presence>")
+    muc = (
+        "<presence to='room@muc' from='x'><show>chat</show>"
+        "<games><valorant><st>x</st></valorant></games></presence>"
+    )
     out, rem = process_c2s(muc)
     assert out == muc and rem == "", (out, rem)
 
@@ -1238,36 +1300,44 @@ if __name__ == "__main__":
     out, rem = process_c2s('<presence type="unavailable"/>')
     assert rem == "" and out.startswith("<presence"), (out, rem)
 
-    roster = (b"<iq type='result'><query xmlns='jabber:iq:riotgames:roster'>"
-              b"<item jid='real@pvp.net'/></query></iq>")
+    roster = (
+        b"<iq type='result'><query xmlns='jabber:iq:riotgames:roster'>"
+        b"<item jid='real@pvp.net'/></query></iq>"
+    )
     hacked = inject_fake_roster(roster)
     assert hacked is not None
     assert b"Valorant Scout Active" in hacked
     assert hacked.index(b"Valorant Scout Active") < hacked.index(b"real@pvp.net")
     assert inject_fake_roster(b"<iq><nothing/></iq>") is None
 
-    ver_blob = base64.b64encode(json.dumps(
-        {"partyPresenceData": {"partyClientVersion": "release-10.11-shipping-9-9"}}
-    ).encode()).decode()
-    pv = (f'<presence from="me"><games><valorant><st>x</st>'
-          f'<p>{ver_blob}</p></valorant></games></presence>')
+    ver_blob = base64.b64encode(
+        json.dumps(
+            {"partyPresenceData": {"partyClientVersion": "release-10.11-shipping-9-9"}}
+        ).encode()
+    ).decode()
+    pv = (
+        f'<presence from="me"><games><valorant><st>x</st>'
+        f"<p>{ver_blob}</p></valorant></games></presence>"
+    )
     assert _extract_valorant_version(pv) == "release-10.11-shipping-9-9"
-    assert _extract_valorant_private(pv)["partyPresenceData"]["partyClientVersion"] \
-        == "release-10.11-shipping-9-9"
+    _priv = _extract_valorant_private(pv)
+    assert _priv is not None
+    assert _priv["partyPresenceData"]["partyClientVersion"] == "release-10.11-shipping-9-9"
     _fp = _fake_presence("release-10.11-shipping-9-9").decode()
     assert _extract_valorant_version(_fp) == "release-10.11-shipping-9-9"
     assert _extract_valorant_version("<presence><show>chat</show></presence>") is None
     _m = re.search(r"<valorant\b[^>]*>.*?<p>([A-Za-z0-9+/=]+)</p>", _fp, re.DOTALL)
+    assert _m is not None
     _blob = json.loads(base64.b64decode(_m.group(1)))
     assert _blob["playerPresenceData"].get("playerCardId"), _blob
     assert _blob["playerPresenceData"].get("playerTitleId"), _blob
     assert _blob["partyPresenceData"].get("partyPrecisePlatformTypes") == 1, _blob
     assert "&quot;pty&quot;" in _fp and _fp.count("<p>") == 2, _fp
 
-    seen = []
+    seen: list[str] = []
     out, rem = process_c2s(p, on_presence=seen.append)
     assert seen and seen[0].startswith("<presence") and "to=" not in seen[0][:60]
-    seen2 = []
+    seen2: list[str] = []
     process_c2s(muc, on_presence=seen2.append)
     assert seen2 == []
     passthru, _ = process_c2s(p, rewrite=False)
@@ -1287,14 +1357,20 @@ if __name__ == "__main__":
     assert strip_fake_stanzas(f"<iq to='{_FAKE_JID}' id='1'><q/></iq>{real}") == real
     assert strip_fake_stanzas(real + "<message to='x'") == real + "<message to='x'"
 
-    for st, want in (("offline", "Offline Mode Active"),
-                     ("away", "Away Mode Active"),
-                     ("mobile", "Mobile Mode Active"),
-                     ("online", "Online Mode Active")):
+    for st, want in (
+        ("offline", "Offline Mode Active"),
+        ("away", "Away Mode Active"),
+        ("mobile", "Mobile Mode Active"),
+        ("online", "Online Mode Active"),
+    ):
         assert _roster_name(st) == want, (st, _roster_name(st))
-        blob = json.loads(base64.b64decode(re.search(
+        match = re.search(
             r"<valorant\b[^>]*>.*?<p>([A-Za-z0-9+/=]+)</p>",
-            _fake_presence("v", st).decode(), re.DOTALL).group(1)))
+            _fake_presence("v", st).decode(),
+            re.DOTALL,
+        )
+        assert match is not None
+        blob = json.loads(base64.b64decode(match.group(1)))
         assert blob["premierPresenceData"]["rosterName"] == want, blob
     assert all(_roster_name(s) for s in _VALID_STATUS)
 
