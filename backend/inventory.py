@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-
 import threading
 import time
+from typing import TYPE_CHECKING, Any
 
 import valapi
+
+if TYPE_CHECKING:
+    from riot_client import LocalAuth
 
 ITEM_TYPES = {
     "skins": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
@@ -37,10 +40,11 @@ _MELEE_VP = 3550
 _VP_PER_USD = 107.0
 
 _LOCK = threading.Lock()
-_CACHE: dict[str, dict] = {}
+_CACHE: dict[str, dict[str, Any]] = {}
 _TTL = 600.0
 
-def last_good(puuid: str | None = None) -> dict | None:
+
+def last_good(puuid: str | None = None) -> dict[str, Any] | None:
     with _LOCK:
         cached = _CACHE.get(str(puuid)) if puuid else None
         if not cached or not cached.get("data"):
@@ -48,7 +52,7 @@ def last_good(puuid: str | None = None) -> dict | None:
         return {**cached["data"], "stale": True}
 
 
-def _contract_rewards() -> set:
+def _contract_rewards() -> set[Any]:
     if "_contractskins" in valapi._cache:
         return valapi._cache["_contractskins"]
     out = set()
@@ -62,7 +66,8 @@ def _contract_rewards() -> set:
     valapi._cache["_contractskins"] = out
     return out
 
-def _base_levels() -> dict:
+
+def _base_levels() -> dict[str, Any]:
     if "_baselevels" in valapi._cache:
         return valapi._cache["_baselevels"]
     out = {}
@@ -84,12 +89,17 @@ def _base_levels() -> dict:
     valapi._cache["_baselevels"] = out
     return out
 
-def _owned_ids(auth, item_type: str) -> list[str]:
-    data = auth.pd_get(f"/store/v1/entitlements/{auth.puuid}/{item_type}")
-    return [(e.get("ItemID") or "").lower()
-            for e in (data or {}).get("Entitlements", []) or [] if e.get("ItemID")]
 
-def snapshot(auth) -> dict:
+def _owned_ids(auth: LocalAuth, item_type: str) -> list[str]:
+    data = auth.pd_get(f"/store/v1/entitlements/{auth.puuid}/{item_type}")
+    return [
+        (e.get("ItemID") or "").lower()
+        for e in (data or {}).get("Entitlements", []) or []
+        if e.get("ItemID")
+    ]
+
+
+def snapshot(auth: LocalAuth) -> dict[str, Any]:
     now = time.time()
     auth.headers()
     owner = str(auth.puuid)
@@ -115,7 +125,7 @@ def snapshot(auth) -> dict:
         total += meta["vp"]
         priced.append(meta)
     priced.sort(key=lambda s: s["vp"], reverse=True)
-    tiers = {}
+    tiers: dict[str, Any] = {}
     for item in priced:
         bucket = tiers.setdefault(item.get("tier") or "Other", {"skins": 0, "vp": 0})
         bucket["skins"] += 1
@@ -129,7 +139,7 @@ def snapshot(auth) -> dict:
 
     wallet = (auth.pd_get(f"/store/v1/wallet/{auth.puuid}") or {}).get("Balances") or {}
 
-    counts = {"skins": len(priced), "earned": earned}
+    counts: dict[str, int | None] = {"skins": len(priced), "earned": earned}
     for key in ("buddies", "cards", "sprays", "agents"):
         try:
             counts[key] = len(_owned_ids(auth, ITEM_TYPES[key]))
@@ -140,8 +150,11 @@ def snapshot(auth) -> dict:
         "available": True,
         "totalVp": total,
         "usdApprox": round(total / _VP_PER_USD),
-        "wallet": {"vp": wallet.get(_CUR_VP, 0), "rad": wallet.get(_CUR_RAD, 0),
-                   "kc": wallet.get(_CUR_KC, 0)},
+        "wallet": {
+            "vp": wallet.get(_CUR_VP, 0),
+            "rad": wallet.get(_CUR_RAD, 0),
+            "kc": wallet.get(_CUR_KC, 0),
+        },
         "counts": counts,
         "tiers": tiers,
         "top": priced[:20],
@@ -154,15 +167,15 @@ def snapshot(auth) -> dict:
 
 
 if __name__ == "__main__":
-    _VP_BY_NAME = {"Select": 875, "Deluxe": 1275, "Premium": 1775,
-                   "Exclusive": 2175, "Ultra": 2475}
+    _VP_BY_NAME = {"Select": 875, "Deluxe": 1275, "Premium": 1775, "Exclusive": 2175, "Ultra": 2475}
     tiers = valapi._get("contenttiers") or []
     assert tiers, "couldn't fetch contenttiers"
     for t in tiers:
         uuid, name = (t.get("uuid") or "").lower(), t.get("devName")
         assert uuid in _TIER_VP, f"{name} ({uuid}) missing from _TIER_VP"
         assert _TIER_VP[uuid] == _VP_BY_NAME[name], (
-            f"{name} priced {_TIER_VP[uuid]}, should be {_VP_BY_NAME[name]}")
+            f"{name} priced {_TIER_VP[uuid]}, should be {_VP_BY_NAME[name]}"
+        )
     assert len(_TIER_VP) == len(tiers), "_TIER_VP has uuids the API doesn't know"
 
     base = _base_levels()
@@ -171,5 +184,7 @@ if __name__ == "__main__":
 
     assert _contract_rewards() & set(base), "reward exclusion matched nothing"
 
-    print(f"inventory self-check OK ({len(base)} priced skins, "
-          f"{len(_contract_rewards())} reward skins excluded)")
+    print(
+        f"inventory self-check OK ({len(base)} priced skins, "
+        f"{len(_contract_rewards())} reward skins excluded)"
+    )

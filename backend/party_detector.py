@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from typing import Any
 
 PARTY_THRESHOLD = 2
 
-def build_cooccurrence(matches: list[dict]) -> dict[str, dict]:
-    pass
-    table: dict[str, dict] = {}
+
+def build_cooccurrence(matches: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    table: dict[str, dict[str, Any]] = {}
     for match in matches:
         for mate in match.get("teammates", []):
             puuid = mate.get("puuid")
@@ -31,14 +31,11 @@ def build_cooccurrence(matches: list[dict]) -> dict[str, dict]:
             entry["name"] = mate.get("name", entry["name"])
     return table
 
-def analyze(matches: list[dict], top_n: int = 5) -> dict:
-    pass
+
+def analyze(matches: list[dict[str, Any]], top_n: int = 5) -> dict[str, Any]:
     table = build_cooccurrence(matches)
 
-    flagged = {
-        puuid: e for puuid, e in table.items()
-        if e["sharedMatches"] >= PARTY_THRESHOLD
-    }
+    flagged = {puuid: e for puuid, e in table.items() if e["sharedMatches"] >= PARTY_THRESHOLD}
 
     annotated = []
     for match in matches:
@@ -46,12 +43,14 @@ def analyze(matches: list[dict], top_n: int = 5) -> dict:
         for mate in match.get("teammates", []):
             puuid = mate.get("puuid")
             if puuid in flagged:
-                party_members.append({
-                    "puuid": puuid,
-                    "name": mate.get("name", flagged[puuid]["name"]),
-                    "agent": mate.get("agent"),
-                    "sharedMatches": flagged[puuid]["sharedMatches"],
-                })
+                party_members.append(
+                    {
+                        "puuid": puuid,
+                        "name": mate.get("name", flagged[puuid]["name"]),
+                        "agent": mate.get("agent"),
+                        "sharedMatches": flagged[puuid]["sharedMatches"],
+                    }
+                )
         enriched = dict(match)
         enriched["partyMembers"] = party_members
         annotated.append(enriched)

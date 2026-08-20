@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import requests
 
 BASE = "https://valorant-api.com/v1"
@@ -13,9 +15,10 @@ WEAPON_UUIDS = {
     "Classic": "29a0cfab-485b-f5d5-779a-b59f85e204a8",
 }
 
-_cache: dict = {}
+_cache: dict[str, Any] = {}
 
-def _get(path: str):
+
+def _get(path: str) -> Any:
     if path in _cache:
         return _cache[path]
     try:
@@ -25,7 +28,8 @@ def _get(path: str):
     _cache[path] = data
     return data
 
-def _skins_map() -> dict:
+
+def _skins_map() -> dict[str, Any]:
     if "_skins" in _cache:
         return _cache["_skins"]
     out = {}
@@ -37,8 +41,8 @@ def _skins_map() -> dict:
     _cache["_skins"] = out
     return out
 
-def skin_from_id(skin_id: str, weapon: str = "Vandal"):
-    pass
+
+def skin_from_id(skin_id: str, weapon: str = "Vandal") -> dict[str, Any] | None:
     if not skin_id:
         return None
     entry = _skins_map().get(skin_id.lower())
@@ -47,39 +51,56 @@ def skin_from_id(skin_id: str, weapon: str = "Vandal"):
     name = entry["name"].replace(f" {weapon}", "").strip() or entry["name"]
     return {"name": name, "icon": entry["icon"]}
 
+
 WEAPON_ORDER = [
-    "Vandal", "Phantom", "Operator", "Sheriff", "Classic", "Ghost", "Frenzy",
-    "Spectre", "Stinger", "Bulldog", "Guardian", "Marshal", "Outlaw", "Bucky",
-    "Judge", "Ares", "Odin", "Shorty", "Melee",
+    "Vandal",
+    "Phantom",
+    "Operator",
+    "Sheriff",
+    "Classic",
+    "Ghost",
+    "Frenzy",
+    "Spectre",
+    "Stinger",
+    "Bulldog",
+    "Guardian",
+    "Marshal",
+    "Outlaw",
+    "Bucky",
+    "Judge",
+    "Ares",
+    "Odin",
+    "Shorty",
+    "Melee",
 ]
 
-def _weapons_map() -> dict:
-    pass
+
+def _weapons_map() -> dict[str, Any]:
     if "_weapons" in _cache:
         return _cache["_weapons"]
     out = {}
     for w in _get("weapons") or []:
         if w.get("uuid") and w.get("displayName"):
-            out[w["uuid"].lower()] = {"name": w["displayName"],
-                                      "icon": w.get("displayIcon")}
+            out[w["uuid"].lower()] = {"name": w["displayName"], "icon": w.get("displayIcon")}
     _cache["_weapons"] = out
     return out
 
-def weapon_name(uuid: str):
+
+def weapon_name(uuid: str) -> str | None:
     if not uuid:
         return None
     entry = _weapons_map().get(uuid.lower())
     return entry["name"] if entry else None
 
-def weapon_icon(uuid: str):
-    pass
+
+def weapon_icon(uuid: str) -> str | None:
     if not uuid:
         return None
     entry = _weapons_map().get(uuid.lower())
     return entry["icon"] if entry else None
 
-def skins_for_weapon(weapon: str) -> list:
-    pass
+
+def skins_for_weapon(weapon: str) -> list[Any]:
     key = "_skinsfor_" + weapon.lower()
     if key in _cache:
         return _cache[key]
@@ -92,8 +113,8 @@ def skins_for_weapon(weapon: str) -> list:
     _cache[key] = out
     return out
 
-def loadout_weapons(items: dict) -> list:
-    pass
+
+def loadout_weapons(items: dict[str, Any]) -> list[Any]:
     if not items:
         return []
     out = []
@@ -101,19 +122,24 @@ def loadout_weapons(items: dict) -> list:
         wname = weapon_name(wuuid)
         if not wname:
             continue
-        skin_id = (((item or {}).get("Sockets", {}) or {}).get(SKIN_SOCKET, {})
-                   .get("Item", {}).get("ID"))
+        skin_id = (
+            ((item or {}).get("Sockets", {}) or {}).get(SKIN_SOCKET, {}).get("Item", {}).get("ID")
+        )
         skin = skin_from_id(skin_id, wname) if skin_id else None
 
-        if (not skin or not skin.get("icon")
-                or (skin.get("name") or "").strip().lower() == "standard"):
+        if (
+            not skin
+            or not skin.get("icon")
+            or (skin.get("name") or "").strip().lower() == "standard"
+        ):
             skin = {"name": "Standard", "icon": weapon_icon(wuuid)}
         out.append({"weapon": wname, "skin": skin})
     order = {name: i for i, name in enumerate(WEAPON_ORDER)}
-    out.sort(key=lambda w: order.get(w["weapon"], len(order)))
+    out.sort(key=lambda w: order.get(str(w["weapon"]), len(order)))
     return out
 
-def _tiers_map() -> dict:
+
+def _tiers_map() -> dict[int, Any]:
     if "_tiers" in _cache:
         return _cache["_tiers"]
     out = {}
@@ -124,34 +150,39 @@ def _tiers_map() -> dict:
     _cache["_tiers"] = out
     return out
 
-def rank_icon(tier: int):
+
+def rank_icon(tier: int) -> str | None:
     return (_tiers_map().get(int(tier or 0)) or {}).get("icon")
 
-def cached_rank_icon(tier: int):
+
+def cached_rank_icon(tier: int) -> str | None:
     tiers = _cache.get("_tiers")
     if not isinstance(tiers, dict):
         return None
     return (tiers.get(int(tier or 0)) or {}).get("icon")
 
-def _titles_map() -> dict:
+
+def _titles_map() -> dict[str, Any]:
     if "_titles" in _cache:
         return _cache["_titles"]
-    out = {t["uuid"].lower(): (t.get("titleText") or "")
-           for t in (_get("playertitles") or [])}
+    out = {t["uuid"].lower(): (t.get("titleText") or "") for t in (_get("playertitles") or [])}
     _cache["_titles"] = out
     return out
 
-def title_text(title_id: str):
+
+def title_text(title_id: str | None) -> str | None:
     if not title_id:
         return None
     return _titles_map().get(title_id.lower()) or None
 
-def player_card(card_id: str, kind: str = "wide"):
+
+def player_card(card_id: str | None, kind: str = "wide") -> str | None:
     if not card_id:
         return None
     return f"https://media.valorant-api.com/playercards/{card_id}/{kind}art.png"
 
-def _maps_map() -> dict:
+
+def _maps_map() -> dict[str, Any]:
     if "_maps" in _cache:
         return _cache["_maps"]
     out = {}
@@ -161,13 +192,14 @@ def _maps_map() -> dict:
     _cache["_maps"] = out
     return out
 
-def map_splash(name: str):
+
+def map_splash(name: str) -> str | None:
     if not name:
         return None
     return _maps_map().get(name)
 
-def _act_number(name: str):
-    pass
+
+def _act_number(name: str) -> int | None:
     parts = (name or "").strip().split()
     tok = parts[-1] if parts else ""
     if tok.isdigit():
@@ -182,8 +214,8 @@ def _act_number(name: str):
         prev = v
     return total or None
 
-def _episode_label(name: str):
-    pass
+
+def _episode_label(name: str | None) -> str | None:
     if not name:
         return None
     for tok in name.split():
@@ -195,8 +227,8 @@ def _episode_label(name: str):
         return f"E{n}" if n else None
     return None
 
-def _season_labels() -> dict:
-    pass
+
+def _season_labels() -> dict[str, Any]:
     if "_seasonlabels" in _cache:
         return _cache["_seasonlabels"]
     data = _get("seasons") or []
@@ -210,12 +242,12 @@ def _season_labels() -> dict:
             continue
         ep = by_id.get((s.get("parentUuid") or "").lower())
         ep_label = _episode_label((ep or {}).get("displayName"))
-        out[s["uuid"].lower()] = (f"{ep_label} Act {num}" if ep_label else f"Act {num}")
+        out[s["uuid"].lower()] = f"{ep_label} Act {num}" if ep_label else f"Act {num}"
     _cache["_seasonlabels"] = out
     return out
 
-def season_label(season_id: str):
-    pass
+
+def season_label(season_id: str) -> str | None:
     if not season_id:
         return None
     return _season_labels().get(season_id.lower())

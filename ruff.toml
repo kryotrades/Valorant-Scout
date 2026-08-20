@@ -1,0 +1,142 @@
+# Ruff — the Python half of scripts/lint.ps1. Root only: a config in a
+# subdirectory is a suppression nobody can see, and lint.ps1 rejects one.
+#
+# 100 columns because that is what this code was written to: 24 lines exceeded
+# 110 and 50 exceeded 100, so 100 is the narrowest limit that describes the
+# existing style rather than inventing a new one. `ruff format` owns the layout
+# from here; lint.ps1 runs `ruff format --check` and fails on a difference.
+line-length = 100
+target-version = "py312"
+
+extend-exclude = [".venv", "frontend", "dist"]
+
+[lint]
+# Every rule ruff has. Hand-picking families is how a rule that would have
+# caught something never gets a chance to: this config used to name 37 of them
+# and ignore BLE001 and C901, neither of whose family was in the list, so both
+# ignores were dead and both rules had never run.
+#
+# Preview rules are deliberately not enabled. They change between releases and
+# a lint suite that moves under you on `pip install --upgrade` is one people
+# start passing --no-verify to.
+select = ["ALL"]
+
+# Every entry below is an exception with a reason. Add one only with its reason
+# written next to it; that is the whole point of arguing it here instead of
+# hiding a `# noqa` at the call site, which lint.ps1 rejects outright.
+ignore = [
+  # --- style the formatter owns -------------------------------------------
+  # COM812 in particular fights `ruff format` directly; ruff's own docs say not
+  # to run the two together.
+  "COM",
+
+  # --- documentation --------------------------------------------------------
+  # This is an application, not a library: nothing here is imported by anyone
+  # else, and the release build strips every docstring out of the artifact
+  # anyway. 346 annotation findings and 246 docstring findings would be churn
+  # in service of an audience that does not exist.
+  "ANN",
+  "D",
+
+  # --- deliberate architecture ----------------------------------------------
+  # The scoreboard must never take the app down. Riot's local API returns
+  # whatever it feels like mid-patch, and every `except Exception` here exists
+  # to keep a stale board on screen instead of a traceback.
+  "BLE001",
+  "S110",     # ...and the same paths that catch it deliberately do nothing.
+  "S112",
+  "TRY300",
+  "TRY301",
+  "TRY400",
+  "PERF203",  # try/except inside a loop is how a single bad player is skipped.
+
+  # Riot's local client serves the entitlements and glz APIs over HTTPS on
+  # 127.0.0.1 with a self-signed certificate. verify=False is not a mistake, it
+  # is the only way to talk to it; urllib3's warning is silenced at import.
+  "S501",
+
+  # Driving Windows is this program's job: taskkill, netstat, powershell, the
+  # Python installer. Every call site passes a literal argv list, never a
+  # string, so there is no shell to inject into.
+  "S603",
+  "S607",
+
+  # The demo lobby is cosmetic. Nothing here seeds a token or a key.
+  "S311",
+  "S310",     # ...and the only URLs opened are 127.0.0.1 health probes.
+
+  # The four `if __name__ == "__main__"` self-checks are assert-based by
+  # design; lint.ps1 runs them. See AGENTS.md.
+  "S101",
+  "PT018",
+
+  # Console output is the product. cli.py IS a terminal UI, run.py narrates
+  # startup, and the backend's prints land in .scout/backend-console.log.
+  "T201",
+
+  # Deliberate: `import offline_launch` inside a route keeps a 1300-line module
+  # and its chat-proxy threads out of a backend that may never launch offline
+  # mode, and several imports are local purely to break an import cycle.
+  "PLC0415",
+
+  # Module-level caches with a lock beside them. A class per cache would not
+  # make the sharing any less global, only harder to find.
+  "PLW0603",
+  "RUF012",
+
+  # backend/ is imported by path (sys.path.insert), not as a package. Adding
+  # __init__.py files would change how every module resolves its siblings.
+  "INP",
+
+  # dry_run=True is the safety default on instalock, dodge and queue control,
+  # and it is passed positionally through four layers. Making it keyword-only
+  # is a real refactor of the command surface, not a lint fix.
+  "FBT",
+
+  # Thresholds, HTTP codes and rank tiers read better as the number than as a
+  # constant named after the number.
+  "PLR2004",
+
+  # Long argument lists and branchy functions on internal helpers. C901 fires
+  # on the reveal pipeline, which is branchy because Riot's responses are.
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR1702", "C901",
+  "ARG001", "ARG002",
+  "TRY003", "EM101", "EM102",
+
+  # Riot timestamps are epoch milliseconds and the logs are already UTC; the
+  # naive-datetime rules fire on code that is explicitly UTC.
+  "DTZ005",
+
+  # `except OSError: pass` is clearer than importing contextlib to say it.
+  "SIM105",
+
+  # live_match reaches into LiveMatch internals from app.py's /api/state. That
+  # is one call, and moving it would mean a public method that exists for one
+  # caller.
+  "SLF001",
+
+  # Logging with an f-string loses lazy formatting; the call sites here are in
+  # cold error paths where that costs nothing and reads better.
+  "G004",
+
+  # PLW2901 fires on the idiomatic `line = line.strip()` in the .env readers.
+  "PLW2901",
+
+  # `subprocess.run` without check= is correct where the exit code is examined
+  # (or deliberately ignored, as with taskkill on a process that already died).
+  "PLW1510",
+
+  # os.path throughout. Converting 125 call sites to pathlib is a real refactor
+  # with real risk on Windows short paths and UNC roots, and it buys nothing
+  # today. Upgrade path: drop this line and do it in one pass, not
+  # opportunistically.
+  "PTH",
+]
+
+[lint.per-file-ignores]
+# cli.py must set SCOUT_QUIET and print its banner before importing rich, or a
+# slow import leaves the user staring at a blank console. run.py has to put
+# backend/ on sys.path before it can import anything out of it. Both are
+# module-level imports that cannot be at the top, and both are one line.
+"cli.py" = ["E402"]
+"run.py" = ["E402"]

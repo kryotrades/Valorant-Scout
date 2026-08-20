@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from typing import Any
 
 from agents import resolve_agent
 from riot_client import LocalAuth
 from vconstants import map_name_from_path
 
-def _self_session_state(presences: list, puuid: str) -> str | None:
-    pass
+
+def _self_session_state(presences: list[Any], puuid: str) -> str | None:
     for p in presences or []:
         if p.get("puuid") != puuid:
             continue
@@ -25,35 +26,47 @@ def _self_session_state(presences: list, puuid: str) -> str | None:
         return data.get("sessionLoopState")
     return None
 
-def _side_from_match(match: dict, puuid: str) -> str | None:
+
+def _side_from_match(match: dict[str, Any], puuid: str) -> str | None:
     ally = (match or {}).get("AllyTeam") or {}
     team = ally.get("TeamID")
-    return {"Red": "Attacker", "Blue": "Defender"}.get(team)
+    return {"Red": "Attacker", "Blue": "Defender"}.get(team or "")
+
 
 class InstalockWorker:
-    pass
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self.state = {"running": False, "status": "idle", "message": "",
-                      "agent": None, "mode": "lock", "side": None, "map": None}
+        self.state = {
+            "running": False,
+            "status": "idle",
+            "message": "",
+            "agent": None,
+            "mode": "lock",
+            "side": None,
+            "map": None,
+        }
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         return dict(self.state)
 
     @staticmethod
-    def _normalize_per_map(per_map: dict | None) -> dict:
-        pass
+    def _normalize_per_map(per_map: dict[str, Any] | None) -> dict[str, Any]:
         out: dict[str, str] = {}
         for k, v in (per_map or {}).items():
             if k and v:
                 out[str(k).strip().lower()] = str(v).strip()
         return out
 
-    def start(self, agent_id: str, mode: str = "lock", delay: float = 0.0,
-              region: str | None = None, per_map: dict | None = None) -> dict:
+    def start(
+        self,
+        agent_id: str,
+        mode: str = "lock",
+        delay: float = 0.0,
+        region: str | None = None,
+        per_map: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         agent = resolve_agent(agent_id)
         if not agent:
             return {"ok": False, "message": f"Unknown agent '{agent_id}'."}
@@ -61,23 +74,34 @@ class InstalockWorker:
 
         for mapn, name in per_map_norm.items():
             if not resolve_agent(name):
-                return {"ok": False,
-                        "message": f"Unknown agent '{name}' for map '{mapn}'."}
+                return {"ok": False, "message": f"Unknown agent '{name}' for map '{mapn}'."}
         self.stop()
         with self._lock:
             self._stop.clear()
-            self.state.update(running=True, status="waiting", agent=agent["name"],
-                              mode=mode, side=None, map=None,
-                              message="Armed — waiting for agent select…")
+            self.state.update(
+                running=True,
+                status="waiting",
+                agent=agent["name"],
+                mode=mode,
+                side=None,
+                map=None,
+                message="Armed — waiting for agent select…",
+            )
             self._thread = threading.Thread(
                 target=self._loop,
                 args=(agent, mode, float(delay or 0), region, per_map_norm),
-                daemon=True)
+                daemon=True,
+            )
             self._thread.start()
-        return {"ok": True, "running": True, "agent": agent["name"],
-                "status": "waiting", "perMap": per_map_norm}
+        return {
+            "ok": True,
+            "running": True,
+            "agent": agent["name"],
+            "status": "waiting",
+            "perMap": per_map_norm,
+        }
 
-    def stop(self) -> dict:
+    def stop(self) -> dict[str, Any]:
         self._stop.set()
         t = self._thread
         if t and t.is_alive() and t is not threading.current_thread():
@@ -87,14 +111,22 @@ class InstalockWorker:
         self.state.update(running=False)
         return {"ok": True, "running": False}
 
-    def _loop(self, agent: dict, mode: str, delay: float, region, per_map: dict):
+    def _loop(
+        self,
+        agent: dict[str, Any],
+        mode: str,
+        delay: float,
+        region: str | None,
+        per_map: dict[str, Any],
+    ) -> None:
         done: set[str] = set()
         try:
             auth = LocalAuth(region)
             auth.headers()
         except Exception as e:
-            self.state.update(running=False, status="error",
-                              message=f"Couldn't reach the local client: {e}")
+            self.state.update(
+                running=False, status="error", message=f"Couldn't reach the local client: {e}"
+            )
             return
 
         while not self._stop.is_set():
@@ -123,18 +155,25 @@ class InstalockWorker:
                             auth.glz_post(f"/pregame/v1/matches/{mid}/lock/{agent_id}")
                         done.add(mid)
                         self.state.update(
-                            running=False, status="locked", side=side,
-                            agent=chosen["name"], map=map_name,
+                            running=False,
+                            status="locked",
+                            side=side,
+                            agent=chosen["name"],
+                            map=map_name,
                             message=f"{'Locked' if mode == 'lock' else 'Hovered'} "
-                                    f"{chosen['name']}"
-                                    + (f" on {map_name}" if map_name and map_name != "Unknown" else "")
-                                    + "!"
-                                    + (f"  You're {side}." if side else ""))
+                            f"{chosen['name']}"
+                            + (f" on {map_name}" if map_name and map_name != "Unknown" else "")
+                            + "!"
+                            + (f"  You're {side}." if side else ""),
+                        )
                         return
 
                 elif st is None:
-                    self.state.update(running=False, status="error",
-                                      message="Local client not reachable — is VALORANT open?")
+                    self.state.update(
+                        running=False,
+                        status="error",
+                        message="Local client not reachable — is VALORANT open?",
+                    )
                     return
                 if self._stop.wait(1.0):
                     break

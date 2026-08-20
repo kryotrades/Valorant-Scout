@@ -1,0 +1,29 @@
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Deliberately no end_of_line here. .gitattributes marks the tree `text=auto`,
+# so what lands on disk depends on the checkout: LF on a machine with
+# core.autocrlf=false, CRLF on one without. Claiming either would make
+# editorconfig-checker disagree with git on half the clones. The files whose
+# endings are actually pinned say so below.
+
+[*.{yml,yaml,json,md,toml}]
+indent_size = 2
+
+# cmd.exe mishandles LF-only batch files at a line boundary, and the release
+# verifier rejects a .ps1 that is not UTF-8-with-BOM + CRLF.
+[*.{bat,cmd,ps1,psd1}]
+end_of_line = crlf
+
+[*.{ps1,psd1}]
+charset = utf-8-bom
+
+# git runs hooks through its bundled sh, which refuses a CR in the shebang.
+[.githooks/*]
+end_of_line = lf

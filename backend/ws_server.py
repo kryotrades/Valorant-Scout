@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import json
 import os
@@ -12,16 +13,22 @@ import webbrowser
 from http import HTTPStatus
 from urllib.parse import urlparse
 
+from common import console_logger
 from scout_commands import ACK_FIELDS
 
 try:
-    from websockets.legacy.server import serve as _ws_serve
     from websockets.exceptions import ConnectionClosed
+    from websockets.legacy.server import serve as _ws_serve
 except Exception as e:
     raise RuntimeError(
         "The 'websockets' package is required for local WebSocket mode. "
         "Run install.bat to repair the installation."
     ) from e
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import scoutlog
 from vconstants import APP_VERSION
@@ -36,19 +43,21 @@ CLOSE_AUTH = 4401
 CLOSE_ORIGIN = 4403
 CLOSE_PROTOCOL = 4406
 
-def _log(msg: str) -> None:
-    print(f"[ws] {msg}", flush=True)
-    LOG.info("%s", msg)
+
+# Not quiet-aware: the bridge failing to start is what the user needs to see.
+_log = console_logger("ws", quiet_aware=False, also=LOG)
+
 
 SESSION_TOKEN: str = ""
 
 ALLOWED_ORIGINS: set[str] = set()
 _FRONTEND_URL = "http://localhost:3000"
 
-_CLIENTS: set = set()
+_CLIENTS: set[Any] = set()
 _LOOP: asyncio.AbstractEventLoop | None = None
 _READY = threading.Event()
 _WS_PORT: int | None = None
+
 
 def _build_allowed_origins(frontend_url: str) -> set[str]:
     frontend_url = (frontend_url or "http://localhost:3000").rstrip("/")
@@ -62,11 +71,12 @@ def _build_allowed_origins(frontend_url: str) -> set[str]:
         origins.add(f"https://www.{parsed.hostname}")
     return origins
 
-def dashboard_url(frontend_url: str, ws_port: int) -> str:
-    return (f"{frontend_url.rstrip('/')}/dashboard"
-            f"?mode=local&port={ws_port}&s={SESSION_TOKEN}")
 
-async def _process_request(path, request_headers):
+def dashboard_url(frontend_url: str, ws_port: int) -> str:
+    return f"{frontend_url.rstrip('/')}/dashboard?mode=local&port={ws_port}&s={SESSION_TOKEN}"
+
+
+async def _process_request(path: str, request_headers: Any) -> Any:
     try:
         get = request_headers.get
     except AttributeError:
@@ -75,15 +85,19 @@ async def _process_request(path, request_headers):
     origin = get("Origin")
     if origin is not None and origin not in ALLOWED_ORIGINS:
         _log(f"rejected origin: {origin}")
-        return (HTTPStatus.FORBIDDEN,
-                [("Content-Type", "text/plain"), ("Content-Length", "16")],
-                b"Forbidden origin")
+        return (
+            HTTPStatus.FORBIDDEN,
+            [("Content-Type", "text/plain"), ("Content-Length", "16")],
+            b"Forbidden origin",
+        )
 
     if get("Access-Control-Request-Private-Network"):
         if origin is None:
-            return (HTTPStatus.FORBIDDEN,
-                    [("Content-Type", "text/plain"), ("Content-Length", "16")],
-                    b"Forbidden origin")
+            return (
+                HTTPStatus.FORBIDDEN,
+                [("Content-Type", "text/plain"), ("Content-Length", "16")],
+                b"Forbidden origin",
+            )
         headers = [
             ("Access-Control-Allow-Origin", origin),
             ("Access-Control-Allow-Private-Network", "true"),
@@ -95,7 +109,8 @@ async def _process_request(path, request_headers):
 
     return None
 
-def handshake_headers(path, request_headers):
+
+def handshake_headers(path: str, request_headers: Any) -> Any:
     origin = request_headers.get("Origin")
     if origin in ALLOWED_ORIGINS:
         return [
@@ -104,27 +119,32 @@ def handshake_headers(path, request_headers):
         ]
     return []
 
+
 def is_ready() -> bool:
     return _READY.is_set()
+
 
 def listening_port() -> int | None:
     return _WS_PORT if _READY.is_set() else None
 
-async def _safe_send(ws, obj) -> bool:
+
+async def _safe_send(ws: Any, obj: Any) -> bool:
     try:
         await ws.send(json.dumps(obj, default=str))
         return True
     except Exception:
         return False
 
-def _parse(raw) -> dict:
+
+def _parse(raw: Any) -> dict[str, Any]:
     try:
         data = json.loads(raw)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
-async def _broadcast(obj) -> None:
+
+async def _broadcast(obj: Any) -> None:
     if not _CLIENTS:
         return
     payload = json.dumps(obj, default=str)
@@ -137,21 +157,29 @@ async def _broadcast(obj) -> None:
     for ws in dead:
         _CLIENTS.discard(ws)
 
+
 def _self_handshake(ws_port: int, timeout: float = 6.0) -> None:
     from websockets.sync.client import connect as _sync_connect
 
-    with _sync_connect(f"ws://127.0.0.1:{ws_port}", open_timeout=timeout,
-                       close_timeout=2) as ws:
-        ws.send(json.dumps({"type": "auth", "token": SESSION_TOKEN,
-                            "protocol": PROTOCOL_VERSION}))
+    with _sync_connect(f"ws://127.0.0.1:{ws_port}", open_timeout=timeout, close_timeout=2) as ws:
+        ws.send(json.dumps({"type": "auth", "token": SESSION_TOKEN, "protocol": PROTOCOL_VERSION}))
         reply = json.loads(ws.recv(timeout=timeout))
         if reply.get("type") != "auth_ok":
             raise RuntimeError(f"self-handshake got {reply.get('type')!r}")
 
-def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
-          remote_controller=None, request_handler=None,
-          poll_interval: float | None = None,
-          open_dashboard: bool = True, backend_port: int | None = None) -> str:
+
+def start(
+    *,
+    board_provider: Callable[[], dict[str, Any]],
+    command_router: Any,
+    frontend_url: str,
+    ws_port: int,
+    remote_controller: Any = None,
+    request_handler: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+    poll_interval: float | None = None,
+    open_dashboard: bool = True,
+    backend_port: int | None = None,
+) -> str:
     global SESSION_TOKEN, ALLOWED_ORIGINS, _FRONTEND_URL, _WS_PORT
 
     _READY.clear()
@@ -159,19 +187,20 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
     SESSION_TOKEN = secrets.token_urlsafe(32)
     _FRONTEND_URL = (frontend_url or "http://localhost:3000").rstrip("/")
     ALLOWED_ORIGINS = _build_allowed_origins(_FRONTEND_URL)
-    interval = float(poll_interval if poll_interval is not None
-                     else os.getenv("WS_STATE_POLL", "4.0"))
+    interval = float(
+        poll_interval if poll_interval is not None else os.getenv("WS_STATE_POLL", "4.0")
+    )
 
     ready = threading.Event()
     boot_error: list[BaseException] = []
 
-    def _run():
+    def _run() -> None:
         global _LOOP, _WS_PORT
         loop = asyncio.new_event_loop()
         _LOOP = loop
         asyncio.set_event_loop(loop)
 
-        async def handler(websocket):
+        async def handler(websocket: Any) -> None:
 
             origin = websocket.request_headers.get("Origin")
             if origin is not None and origin not in ALLOWED_ORIGINS:
@@ -182,9 +211,10 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
 
             try:
                 raw = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-            except asyncio.TimeoutError:
-                await _safe_send(websocket, {"type": "auth_error", "code": "timeout",
-                                             "message": "Auth timeout"})
+            except TimeoutError:
+                await _safe_send(
+                    websocket, {"type": "auth_error", "code": "timeout", "message": "Auth timeout"}
+                )
                 await websocket.close(code=CLOSE_AUTH, reason="Auth timeout")
                 return
             except ConnectionClosed:
@@ -192,30 +222,46 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
 
             msg = _parse(raw)
             if msg.get("type") != "auth" or not hmac.compare_digest(
-                    str(msg.get("token") or ""), SESSION_TOKEN):
-                await _safe_send(websocket, {"type": "auth_error", "code": "bad_token",
-                                             "message": "Invalid token"})
+                str(msg.get("token") or ""), SESSION_TOKEN
+            ):
+                await _safe_send(
+                    websocket,
+                    {"type": "auth_error", "code": "bad_token", "message": "Invalid token"},
+                )
                 await websocket.close(code=CLOSE_AUTH, reason="Invalid token")
                 return
 
             client_proto = msg.get("protocol", 1)
             if not isinstance(client_proto, int) or client_proto not in SUPPORTED_PROTOCOLS:
-                LOG.warning("rejected client protocol %r (supported: %s)",
-                            client_proto, sorted(SUPPORTED_PROTOCOLS))
-                await _safe_send(websocket, {
-                    "type": "auth_error", "code": "incompatible_protocol",
-                    "supported": sorted(SUPPORTED_PROTOCOLS),
-                    "appVersion": APP_VERSION,
-                    "message": "This dashboard is not compatible with the installed "
-                               "Valorant Scout version. Run UPDATE.bat to update the app."})
+                LOG.warning(
+                    "rejected client protocol %r (supported: %s)",
+                    client_proto,
+                    sorted(SUPPORTED_PROTOCOLS),
+                )
+                await _safe_send(
+                    websocket,
+                    {
+                        "type": "auth_error",
+                        "code": "incompatible_protocol",
+                        "supported": sorted(SUPPORTED_PROTOCOLS),
+                        "appVersion": APP_VERSION,
+                        "message": "This dashboard is not compatible with the installed "
+                        "Valorant Scout version. Run UPDATE.bat to update the app.",
+                    },
+                )
                 await websocket.close(code=CLOSE_PROTOCOL, reason="Incompatible protocol")
                 return
 
-            await _safe_send(websocket, {"type": "auth_ok",
-                                         "protocol": PROTOCOL_VERSION,
-                                         "supported": sorted(SUPPORTED_PROTOCOLS),
-                                         "appVersion": APP_VERSION,
-                                         "capabilities": CAPABILITIES})
+            await _safe_send(
+                websocket,
+                {
+                    "type": "auth_ok",
+                    "protocol": PROTOCOL_VERSION,
+                    "supported": sorted(SUPPORTED_PROTOCOLS),
+                    "appVersion": APP_VERSION,
+                    "capabilities": CAPABILITIES,
+                },
+            )
             _CLIENTS.add(websocket)
 
             try:
@@ -234,21 +280,21 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
                         await _safe_send(websocket, {"type": "pong"})
                         continue
                     if mtype == "request" and request_handler is not None:
-
-                        rtype = m.get("request")
+                        rtype = str(m.get("request") or "")
                         params = m.get("params") or {}
                         rid = m.get("id")
                         try:
                             data = await loop.run_in_executor(
-                                None,
-                                lambda r=rtype, p=params: request_handler(r, p))
-                            await _safe_send(websocket, {"type": "response",
-                                                         "id": rid, "ok": True,
-                                                         "data": data})
+                                None, functools.partial(request_handler, rtype, params)
+                            )
+                            await _safe_send(
+                                websocket, {"type": "response", "id": rid, "ok": True, "data": data}
+                            )
                         except Exception as e:
-                            await _safe_send(websocket, {"type": "response",
-                                                         "id": rid, "ok": False,
-                                                         "error": str(e)})
+                            await _safe_send(
+                                websocket,
+                                {"type": "response", "id": rid, "ok": False, "error": str(e)},
+                            )
                         continue
                     if mtype == "command":
                         cmd = m.get("command")
@@ -256,12 +302,20 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
                         cid = m.get("id")
                         result = await loop.run_in_executor(
                             None,
-                            lambda c=cmd, p=payload, i=cid: command_router.execute(
-                                client_id=client_id, command=c, payload=p,
-                                command_id=i))
-                        ack = {"type": "command_ack", "id": cid,
-                               "ok": bool(result.get("ok")),
-                               "message": result.get("message", "")}
+                            functools.partial(
+                                command_router.execute,
+                                client_id=client_id,
+                                command=cmd,
+                                payload=payload,
+                                command_id=cid,
+                            ),
+                        )
+                        ack = {
+                            "type": "command_ack",
+                            "id": cid,
+                            "ok": bool(result.get("ok")),
+                            "message": result.get("message", ""),
+                        }
                         for k in ACK_FIELDS:
                             if k in result:
                                 ack[k] = result[k]
@@ -271,7 +325,7 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
             finally:
                 _CLIENTS.discard(websocket)
 
-        async def _broadcast_loop():
+        async def _broadcast_loop() -> None:
             last = None
             while True:
                 try:
@@ -289,21 +343,26 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
                     pass
                 await asyncio.sleep(interval)
 
-        async def _heartbeat_loop():
+        async def _heartbeat_loop() -> None:
             while True:
                 await asyncio.sleep(30)
                 await _broadcast({"type": "ping"})
 
-        async def _main():
+        async def _main() -> None:
             async with _ws_serve(
-                handler, "127.0.0.1", ws_port,
+                handler,
+                "127.0.0.1",
+                ws_port,
                 process_request=_process_request,
                 extra_headers=handshake_headers,
                 ping_interval=None,
                 max_queue=16,
             ):
-                _log(f"listening on ws://127.0.0.1:{ws_port} "
-                     f"(protocol {PROTOCOL_VERSION}, origins: {', '.join(sorted(ALLOWED_ORIGINS))})")
+                _log(
+                    f"listening on ws://127.0.0.1:{ws_port} "
+                    f"(protocol {PROTOCOL_VERSION}, "
+                    f"origins: {', '.join(sorted(ALLOWED_ORIGINS))})"
+                )
                 ready.set()
                 await asyncio.gather(_broadcast_loop(), _heartbeat_loop())
 
@@ -322,15 +381,17 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
 
     if not ready.wait(timeout=15) or boot_error:
         reason = str(boot_error[0]) if boot_error else "timed out waiting for the listener"
-        raise RuntimeError(f"VS-WS-001 local WebSocket bridge failed to start "
-                           f"on 127.0.0.1:{ws_port}: {reason}")
+        raise RuntimeError(
+            f"VS-WS-001 local WebSocket bridge failed to start on 127.0.0.1:{ws_port}: {reason}"
+        )
 
     try:
         _self_handshake(ws_port)
         LOG.info("authenticated self-handshake ok on port %s", ws_port)
     except Exception as e:
-        raise RuntimeError(f"VS-WS-001 WebSocket self-handshake failed on "
-                           f"127.0.0.1:{ws_port}: {e}") from e
+        raise RuntimeError(
+            f"VS-WS-001 WebSocket self-handshake failed on 127.0.0.1:{ws_port}: {e}"
+        ) from e
 
     _WS_PORT = ws_port
     _READY.set()
@@ -341,19 +402,19 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
 
     return SESSION_TOKEN
 
+
 def _spawn_opener(frontend_url: str, url: str, backend_port: int | None) -> None:
     def _show_fallback() -> None:
-        if os.name != "nt":
-            _log("couldn't open your browser automatically; restart after setting a default browser")
-            return
         try:
             import ctypes
+
             ctypes.windll.user32.MessageBoxW(
                 None,
                 "Valorant Scout couldn't open your default browser.\n\n"
-                "Copy this private one-time dashboard URL (Ctrl+C copies this dialog):\n\n"
-                + url,
-                "Valorant Scout", 0x30)
+                "Copy this private one-time dashboard URL (Ctrl+C copies this dialog):\n\n" + url,
+                "Valorant Scout",
+                0x30,
+            )
         except Exception:
             _log("couldn't open your browser automatically; set a default browser and restart")
 
@@ -367,9 +428,10 @@ def _spawn_opener(frontend_url: str, url: str, backend_port: int | None) -> None
                 time.sleep(1.0)
         return False
 
-    def _wait_and_open():
-        if backend_port and not _wait(f"http://127.0.0.1:{backend_port}/api/health",
-                                      time.time() + 60):
+    def _wait_and_open() -> None:
+        if backend_port and not _wait(
+            f"http://127.0.0.1:{backend_port}/api/health", time.time() + 60
+        ):
             LOG.warning("backend health not confirmed before opening dashboard")
         opened = _wait(frontend_url.rstrip("/") + "/", time.time() + 90)
         try:
@@ -379,7 +441,9 @@ def _spawn_opener(frontend_url: str, url: str, backend_port: int | None) -> None
             LOG.warning("VS-BROWSER-001 couldn't open a browser automatically")
             _show_fallback()
         if not opened:
-            _log("opened dashboard (frontend health unconfirmed — "
-                 "if the page errors, retry once it's up).")
+            _log(
+                "opened dashboard (frontend health unconfirmed — "
+                "if the page errors, retry once it's up)."
+            )
 
     threading.Thread(target=_wait_and_open, daemon=True, name="scout-open").start()

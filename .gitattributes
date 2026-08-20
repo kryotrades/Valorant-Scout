@@ -1,8 +1,15 @@
 # Normalize line endings. Windows launchers must stay CRLF so they run reliably.
 * text=auto
+
+# git runs hooks through its bundled sh, which refuses a shebang line ending in
+# CR. This must come before the *.ps1 rule so the .ps1 half of each hook still
+# gets CRLF; the last matching line wins.
+.githooks/* text eol=lf
+
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+*.psd1 text eol=crlf
 *.png binary
 *.ico binary
 *.jpeg binary

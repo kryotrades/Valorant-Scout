@@ -1,0 +1,25 @@
+# gitleaks — extends the default rule set; this file only narrows *where* it
+# looks. The history is scanned as well as the working tree, because a key that
+# was committed and then deleted is still in the pack file.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build output, installed dependencies and the localhost chat certificate"
+paths = [
+  # Installed packages are not this repository's source, and a Python tree
+  # contains every byte pattern there is: cryptography's own .pyi files trip
+  # the generic-api-key rule.
+  '''\.venv/''',
+  '''node_modules/''',
+  '''(^|/)dist/''',
+  # .scout/ is runtime state. bridge.json genuinely holds a live session token
+  # — that is what it is for — and it is gitignored, so the only thing flagging
+  # it achieves is teaching people to ignore the scanner.
+  '''(^|/)\.scout/''',
+  # The localhost TLS certificate the offline-mode chat proxy presents to the
+  # Riot client. Its key has to be on disk to terminate TLS at all, it is the
+  # same well-known certificate Deceive publishes, and it guards nothing but a
+  # loopback socket. See AGENTS.md.
+  '''backend/offline_chat\.pem''',
+]

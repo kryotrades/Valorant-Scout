@@ -14,7 +14,8 @@ $ws = Get-Content (Join-Path $Root "backend\ws_server.py") -Raw -Encoding UTF8
 if ($ws -match 'PROTOCOL_VERSION\s*=\s*(\d+)') {
     if ([int]$Matches[1] -ne [int]$mf.protocol.version) { Fail "ws_server.py PROTOCOL_VERSION $($Matches[1]) != runtime.json protocol $($mf.protocol.version)"; $bad = 1 }
     else { Ok "backend protocol == runtime.json ($($Matches[1]))" }
-} else { Fail "ws_server.py has no PROTOCOL_VERSION"; $bad = 1 }
+}
+else { Fail "ws_server.py has no PROTOCOL_VERSION"; $bad = 1 }
 
 $transport = Join-Path $Root "frontend\lib\transport.js"
 if (Test-Path $transport) {
@@ -22,7 +23,8 @@ if (Test-Path $transport) {
     if ($t -match 'PROTOCOL_VERSION\s*=\s*(\d+)') {
         if ([int]$Matches[1] -ne [int]$mf.protocol.version) { Fail "transport.js PROTOCOL_VERSION $($Matches[1]) != runtime.json protocol $($mf.protocol.version)"; $bad = 1 }
         else { Ok "frontend protocol == runtime.json ($($Matches[1]))" }
-    } else { Fail "transport.js has no PROTOCOL_VERSION"; $bad = 1 }
+    }
+    else { Fail "transport.js has no PROTOCOL_VERSION"; $bad = 1 }
 
 
     $dash = Get-Content (Join-Path $Root "frontend\components\Dashboard.js") -Raw -Encoding UTF8
@@ -30,7 +32,8 @@ if (Test-Path $transport) {
         if ((Compare-ScoutVersion $Matches[1] $v) -gt 0) { Fail "frontend APP_LATEST '$($Matches[1])' is AHEAD of VERSION '$v'"; $bad = 1 }
         else { Ok "frontend APP_LATEST ($($Matches[1])) <= VERSION" }
     }
-} else {
+}
+else {
     Ok "slim tree (no frontend) - frontend checks skipped"
 }
 

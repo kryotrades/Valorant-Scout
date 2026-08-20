@@ -3,37 +3,38 @@ from __future__ import annotations
 import base64
 import threading
 import time
+from typing import Any
 
 from riot_client import LocalAuth
 
 _CID_PARTS = ("MTAxMjQwMjIx", "MTEzNDkxMDU0Ng==")
-_CLIENT_ID = (base64.b64decode(_CID_PARTS[0]).decode()
-              + base64.b64decode(_CID_PARTS[1]).decode())
+_CLIENT_ID = base64.b64decode(_CID_PARTS[0]).decode() + base64.b64decode(_CID_PARTS[1]).decode()
 
 _UPDATE_SECS = 15
-_worker: "_Worker | None" = None
+_worker: _Worker | None = None
 
-_DISCORD_USER = {"name": None, "username": None, "id": None}
+_DISCORD_USER: dict[str, Any] = {"name": None, "username": None, "id": None}
 
-def discord_user() -> dict:
+
+def discord_user() -> dict[str, Any]:
     return dict(_DISCORD_USER)
 
+
 def probe_discord_identity() -> None:
-    pass
     if _DISCORD_USER["name"]:
         return
     try:
         import json as _json
         import struct as _struct
+
         from pypresence import Presence
+        from pypresence.exceptions import DiscordError, DiscordNotFound, InvalidID, InvalidPipe
         from pypresence.utils import get_ipc_path
-        from pypresence.exceptions import (DiscordNotFound, InvalidPipe,
-                                           InvalidID, DiscordError)
 
         class _IdPresence(Presence):
             captured = None
 
-            async def handshake(self):
+            async def handshake(self) -> Any:
                 ipc_path = get_ipc_path(self.pipe)
                 if not ipc_path:
                     raise DiscordNotFound
@@ -69,10 +70,11 @@ def probe_discord_identity() -> None:
     except Exception:
         pass
 
+
 def maybe_start(region: str | None = None) -> None:
-    pass
     global _worker
     import os
+
     if os.getenv("DISCORD_RPC", "true").strip().lower() == "false":
         return
     if _worker is not None:
@@ -80,26 +82,30 @@ def maybe_start(region: str | None = None) -> None:
     _worker = _Worker(region)
     _worker.start()
 
+
 _BUTTONS = [{"label": "Get Valorant Scout", "url": "https://github.com/kryotrades/valorant-scout"}]
 
+
 class _Worker:
-    def __init__(self, region: str | None):
+    def __init__(self, region: str | None) -> None:
         self.region = region
         self.client_id = _CLIENT_ID
         self._thread: threading.Thread | None = None
         self._last_state: str | None = None
         self._state_since: float = time.time()
 
-    def start(self):
+    def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="DiscordRPC", daemon=True)
         self._thread.start()
 
-    def _run(self):
+    def _run(self) -> None:
         try:
             from pypresence import Presence
         except Exception:
-            print("[discord] pypresence not installed - Rich Presence off "
-                  "(pip install pypresence)", flush=True)
+            print(
+                "[discord] pypresence not installed - Rich Presence off (pip install pypresence)",
+                flush=True,
+            )
             return
 
         rpc = None
@@ -130,11 +136,13 @@ class _Worker:
                 last_payload = None
                 time.sleep(_UPDATE_SECS)
 
-    def _build(self) -> dict | None:
+    def _build(self) -> dict[str, Any] | None:
         import live_match
+
         try:
             board = live_match.LiveMatch(LocalAuth(self.region)).build_scoreboard(
-                include_stats=False)
+                include_stats=False
+            )
         except Exception:
             return None
 
@@ -150,11 +158,11 @@ class _Worker:
         rank_name = (self_p or {}).get("rank", "Unrated")
         rank_icon = (self_p or {}).get("rankIcon")
         if not (self_p or {}).get("rankTier"):
-
             try:
+                import valapi
                 from riot_client import _self_presence_private
                 from vconstants import rank_from_tier
-                import valapi
+
                 priv = _self_presence_private(LocalAuth(self.region)) or {}
                 tier = (priv.get("playerPresenceData") or {}).get("competitiveTier") or 0
                 if tier:
@@ -172,32 +180,40 @@ class _Worker:
             score = board.get("score") or {}
             details = f"{mode} // {score.get('ally', 0)} - {score.get('enemy', 0)}"
             dm = mode in ("Deathmatch", "Team Deathmatch")
-            status = rank_name if dm else                rank_name + (f" · {board['side']}" if board.get("side") else "")
+            status = (
+                rank_name
+                if dm
+                else (rank_name + (f" · {board['side']}" if board.get("side") else ""))
+            )
 
             comp = mode == "Competitive"
             small = rank_icon if comp else ((self_p or {}).get("agentPortrait") or rank_icon)
             small_text = rank_name if comp else (agent or rank_name)
-            return _clean({
-                "details": details,
-                "state": status,
-                "large_image": splash or "game_icon",
-                "large_text": mapn or "VALORANT",
-                "small_image": small,
-                "small_text": small_text,
-                "start": int(self._state_since),
-                "buttons": _BUTTONS,
-            })
+            return _clean(
+                {
+                    "details": details,
+                    "state": status,
+                    "large_image": splash or "game_icon",
+                    "large_text": mapn or "VALORANT",
+                    "small_image": small,
+                    "small_text": small_text,
+                    "start": int(self._state_since),
+                    "buttons": _BUTTONS,
+                }
+            )
         if state == "PREGAME":
-            return _clean({
-                "details": f"Agent Select — {mode}",
-                "state": rank_name,
-                "large_image": splash or "game_icon",
-                "large_text": mapn or "Agent Select",
-                "small_image": rank_icon,
-                "small_text": rank_name,
-                "start": int(self._state_since),
-                "buttons": _BUTTONS,
-            })
+            return _clean(
+                {
+                    "details": f"Agent Select — {mode}",
+                    "state": rank_name,
+                    "large_image": splash or "game_icon",
+                    "large_text": mapn or "Agent Select",
+                    "small_image": rank_icon,
+                    "small_text": rank_name,
+                    "start": int(self._state_since),
+                    "buttons": _BUTTONS,
+                }
+            )
 
         queue = board.get("queue") or {}
         qname = queue.get("queueName") or mode
@@ -208,16 +224,19 @@ class _Worker:
         else:
             details = f"Lobby — {qname}"
             start = None
-        return _clean({
-            "details": details,
-            "state": f"In a Party ({size} of 5)" if size > 1 else rank_name,
-            "large_image": "game_icon",
-            "large_text": "VALORANT",
-            "small_image": rank_icon,
-            "small_text": rank_name,
-            "start": start,
-            "buttons": _BUTTONS,
-        })
+        return _clean(
+            {
+                "details": details,
+                "state": f"In a Party ({size} of 5)" if size > 1 else rank_name,
+                "large_image": "game_icon",
+                "large_text": "VALORANT",
+                "small_image": rank_icon,
+                "small_text": rank_name,
+                "start": start,
+                "buttons": _BUTTONS,
+            }
+        )
 
-def _clean(d: dict) -> dict:
+
+def _clean(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None and v != ""}

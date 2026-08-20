@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import secrets
 import threading
 import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 from urllib.parse import quote
 
 import requests
-
+from common import console_logger
 from scout_commands import ACK_FIELDS
 
 try:
@@ -16,14 +21,17 @@ try:
 except Exception:
     AblyRealtime = None
 
-def _log(msg: str) -> None:
-    print(f"[remote] {msg}", flush=True)
 
-def _slim_for_ably(board: dict) -> dict:
+# Not quiet-aware: this prints the pairing code, which is the only reason
+# the user is looking at the console.
+_log = console_logger("remote", quiet_aware=False)
+
+
+def _slim_for_ably(board: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(board, dict):
         return board
 
-    def slim_player(p):
+    def slim_player(p: dict[str, Any]) -> dict[str, Any]:
         if isinstance(p, dict) and p.get("weapons"):
             q = dict(p)
             q["weapons"] = []
@@ -34,18 +42,23 @@ def _slim_for_ably(board: dict) -> dict:
     if isinstance(out.get("players"), list):
         out["players"] = [slim_player(p) for p in out["players"]]
     if isinstance(out.get("teams"), dict):
-        out["teams"] = {t: [slim_player(p) for p in plist]
-                        for t, plist in out["teams"].items()}
+        out["teams"] = {t: [slim_player(p) for p in plist] for t, plist in out["teams"].items()}
     return out
+
 
 class RemoteConfigError(Exception):
     pass
 
-class RemoteController:
-    pass
 
-    def __init__(self, *, frontend_url: str, token_endpoint: str, board_provider,
-                 data_handler=None):
+class RemoteController:
+    def __init__(
+        self,
+        *,
+        frontend_url: str,
+        token_endpoint: str,
+        board_provider: Callable[[], dict[str, Any]],
+        data_handler: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> None:
         self.frontend_url = (frontend_url or "http://localhost:3000").rstrip("/")
         self.token_endpoint = token_endpoint
         self.board_provider = board_provider
@@ -53,41 +66,43 @@ class RemoteController:
         self.data_handler = data_handler
         self.router = None
         self._lock = threading.Lock()
-        self._session: dict | None = None
+        self._session: dict[str, Any] | None = None
         self._active = False
 
-    def attach_router(self, router) -> None:
+    def attach_router(self, router: Any) -> None:
         self.router = router
 
-    def is_active(self) -> bool:
-        return self._active
-
-    def _fetch_token(self, session_id: str, role: str) -> dict:
-        url = (f"{self.token_endpoint}?sessionId={quote(session_id, safe='')}"
-               f"&role={role}")
+    def _fetch_token(self, session_id: str, role: str) -> dict[str, Any]:
+        url = f"{self.token_endpoint}?sessionId={quote(session_id, safe='')}&role={role}"
         r = requests.get(url, timeout=10)
         if r.status_code == 501:
             raise RemoteConfigError(
                 "Remote mode is not configured. Set ABLY_API_KEY in the "
-                "frontend/Vercel environment.")
+                "frontend/Vercel environment."
+            )
         if not r.ok:
-            raise RuntimeError(f"token endpoint returned {r.status_code}: "
-                               f"{r.text[:200]}")
+            raise RuntimeError(f"token endpoint returned {r.status_code}: {r.text[:200]}")
         data = r.json()
         if not isinstance(data, dict) or not data.get("token"):
             raise RuntimeError("token endpoint returned no token")
         return data
 
-    def enable(self) -> dict:
+    def enable(self) -> dict[str, Any]:
         with self._lock:
             if self._active and self._session:
-                return {"ok": True, "message": "Remote mode already enabled.",
-                        "remoteUrl": self._session["remote_url"],
-                        "remoteSessionId": self._session["session_id"]}
+                return {
+                    "ok": True,
+                    "message": "Remote mode already enabled.",
+                    "remoteUrl": self._session["remote_url"],
+                    "remoteSessionId": self._session["session_id"],
+                }
             if AblyRealtime is None:
-                return {"ok": False, "configured": False,
-                        "message": "Remote mode needs the 'ably' package on the "
-                                   "desktop app. Install it with: pip install ably"}
+                return {
+                    "ok": False,
+                    "configured": False,
+                    "message": "Remote mode needs the 'ably' package on the "
+                    "desktop app. Install it with: pip install ably",
+                }
             if self.router is None:
                 return {"ok": False, "message": "Remote command router not ready."}
 
@@ -97,12 +112,13 @@ class RemoteController:
             except RemoteConfigError as e:
                 return {"ok": False, "configured": False, "message": str(e)}
             except Exception as e:
-                return {"ok": False,
-                        "message": f"Couldn't reach the Ably token endpoint: {e}"}
+                return {"ok": False, "message": f"Couldn't reach the Ably token endpoint: {e}"}
 
             phone_token = phone_details["token"]
-            remote_url = (f"{self.frontend_url}/remote/{session_id}"
-                          f"?mode=remote&t={quote(phone_token, safe='')}")
+            remote_url = (
+                f"{self.frontend_url}/remote/{session_id}"
+                f"?mode=remote&t={quote(phone_token, safe='')}"
+            )
 
             ready = threading.Event()
             sess = {
@@ -118,8 +134,9 @@ class RemoteController:
                 "phone_seen": False,
                 "started_at": time.time(),
             }
-            t = threading.Thread(target=self._agent_thread, args=(sess,),
-                                 daemon=True, name="scout-ably")
+            t = threading.Thread(
+                target=self._agent_thread, args=(sess,), daemon=True, name="scout-ably"
+            )
             sess["thread"] = t
             self._session = sess
             t.start()
@@ -132,17 +149,21 @@ class RemoteController:
 
             self._active = True
             _log(f"remote mode enabled (session {session_id[:8]}…)")
-            return {"ok": True, "message": "Remote mode enabled",
-                    "remoteUrl": remote_url, "remoteSessionId": session_id}
+            return {
+                "ok": True,
+                "message": "Remote mode enabled",
+                "remoteUrl": remote_url,
+                "remoteSessionId": session_id,
+            }
 
-    def disable(self) -> dict:
+    def disable(self) -> dict[str, Any]:
         with self._lock:
             if not self._session:
                 self._active = False
                 return {"ok": True, "message": "Remote mode was not active."}
             return self._teardown_locked()
 
-    def _teardown_locked(self) -> dict:
+    def _teardown_locked(self) -> dict[str, Any]:
         sess = self._session
         self._session = None
         self._active = False
@@ -158,13 +179,12 @@ class RemoteController:
         return {"ok": True, "message": "Remote mode disabled."}
 
     def shutdown(self) -> None:
-        pass
         try:
             self.disable()
         except Exception:
             pass
 
-    def publish_state(self, board: dict) -> None:
+    def publish_state(self, board: dict[str, Any]) -> None:
         sess = self._session
         if not (self._active and sess):
             return
@@ -173,12 +193,11 @@ class RemoteController:
         if loop is None or ch is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(
-                ch.publish("state", _slim_for_ably(board)), loop)
+            asyncio.run_coroutine_threadsafe(ch.publish("state", _slim_for_ably(board)), loop)
         except Exception:
             pass
 
-    def _agent_thread(self, sess: dict) -> None:
+    def _agent_thread(self, sess: dict[str, Any]) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         sess["loop"] = loop
@@ -194,16 +213,17 @@ class RemoteController:
                 pass
             loop.close()
 
-    async def _agent_main(self, sess: dict) -> None:
+    async def _agent_main(self, sess: dict[str, Any]) -> None:
         session_id = sess["session_id"]
         stop = asyncio.Event()
         sess["stop"] = stop
 
-        async def auth_cb(_token_params):
+        async def auth_cb(_token_params: Any) -> Any:
 
             loop = asyncio.get_event_loop()
             details = await loop.run_in_executor(
-                None, lambda: self._fetch_token(session_id, "agent"))
+                None, lambda: self._fetch_token(session_id, "agent")
+            )
             return details["token"]
 
         client = AblyRealtime(auth_callback=auth_cb)
@@ -215,13 +235,14 @@ class RemoteController:
         sess["state_ch"] = state_ch
         sess["ack_ch"] = ack_ch
 
-        async def on_cmd(message):
+        async def on_cmd(message: Any) -> None:
             await self._handle_remote_command(sess, message)
 
         await cmd_ch.subscribe(on_cmd)
 
         try:
-            async def on_presence(member):
+
+            async def on_presence(member: Any) -> None:
                 cid = str(getattr(member, "client_id", "") or "")
                 action = str(getattr(member, "action", "") or "")
                 if cid.startswith("phone"):
@@ -229,16 +250,15 @@ class RemoteController:
 
                     if action in ("enter", "present", ""):
                         try:
-                            await state_ch.publish(
-                                "state", _slim_for_ably(self.board_provider()))
+                            await state_ch.publish("state", _slim_for_ably(self.board_provider()))
                         except Exception:
                             pass
+
             await state_ch.presence.subscribe(on_presence)
             for m in (await state_ch.presence.get()) or []:
                 if str(getattr(m, "client_id", "") or "").startswith("phone"):
                     sess["phone_seen"] = True
         except Exception:
-
             pass
 
         sess["ready"].set()
@@ -248,24 +268,23 @@ class RemoteController:
         except Exception:
             pass
 
-        async def idle_watch():
+        async def idle_watch() -> None:
             await asyncio.sleep(180)
             if not stop.is_set() and not sess.get("phone_seen"):
                 _log("no phone joined within 3 min — disabling remote mode.")
 
                 threading.Thread(target=self.disable, daemon=True).start()
 
-        async def state_pump():
+        async def state_pump() -> None:
 
             while not stop.is_set():
                 try:
-                    await state_ch.publish(
-                        "state", _slim_for_ably(self.board_provider()))
+                    await state_ch.publish("state", _slim_for_ably(self.board_provider()))
                 except Exception:
                     pass
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=4.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
         idle_task = asyncio.ensure_future(idle_watch())
@@ -280,7 +299,7 @@ class RemoteController:
             except Exception:
                 pass
 
-    async def _handle_remote_command(self, sess: dict, message) -> None:
+    async def _handle_remote_command(self, sess: dict[str, Any], message: Any) -> None:
         data = getattr(message, "data", None)
         if isinstance(data, str):
             try:
@@ -294,13 +313,13 @@ class RemoteController:
 
         loop = asyncio.get_event_loop()
 
-        if data.get("request") and self.data_handler is not None:
+        handler = self.data_handler
+        if data.get("request") and handler is not None:
             rid = data.get("id")
-            rtype = data.get("request")
+            rtype = str(data.get("request") or "")
             params = data.get("params") or {}
             try:
-                result = await loop.run_in_executor(
-                    None, lambda: self.data_handler(rtype, params))
+                result = await loop.run_in_executor(None, functools.partial(handler, rtype, params))
                 ack = {"id": rid, "ok": True, "data": result}
             except Exception as e:
                 ack = {"id": rid, "ok": False, "error": str(e)}
@@ -315,13 +334,17 @@ class RemoteController:
         cid = data.get("id")
         client_id = "ably:" + sess["session_id"][:8]
 
+        router = self.router
+        if router is None:
+            return
         result = await loop.run_in_executor(
-            None, lambda: self.router.execute(
-                client_id=client_id, command=command, payload=payload,
-                command_id=cid))
+            None,
+            lambda: router.execute(
+                client_id=client_id, command=command, payload=payload, command_id=cid
+            ),
+        )
 
-        ack = {"id": cid, "ok": bool(result.get("ok")),
-               "message": result.get("message", "")}
+        ack = {"id": cid, "ok": bool(result.get("ok")), "message": result.get("message", "")}
         for k in ACK_FIELDS:
             if k in result:
                 ack[k] = result[k]

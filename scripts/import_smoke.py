@@ -13,6 +13,7 @@ REQUIRED = [
     "websockets.sync.client",
     "ably",
     "valclient",
+    "tzdata",
 ]
 
 failed = []

@@ -27,13 +27,14 @@ try {
     }
     Ok "Windows x64, writable folder, enough disk space."
 
-    $py = Ensure-ExactPython
+    $py = Initialize-ExactPython
 
     $venv = Test-Venv
     if ($venv.Ok) {
         Ok "Existing installation is healthy - nothing to reinstall."
         Write-ScoutLog -Log install -Message "venv healthy, skipping reinstall"
-    } else {
+    }
+    else {
         foreach ($r in $venv.Reasons) { Note "repair needed: $r"; Write-ScoutLog -Log install -Level WARN -Message "repair: $r" }
 
 
@@ -46,11 +47,13 @@ try {
         if ($Frontend) {
             if (-not (Find-Node)) { throw "Node.js 18.17+ LTS is required for the local frontend. Install it from nodejs.org and re-run with -Frontend." }
             Install-NodeDeps
-            Build-Frontend
-        } else {
+            Invoke-FrontendBuild
+        }
+        else {
             Note "Developer tree detected - skipping frontend (run install.bat with -Frontend to build it)."
         }
-    } else {
+    }
+    else {
         Note "Slim install - no local frontend bundled; the app uses the hosted dashboard."
     }
 
@@ -59,16 +62,18 @@ try {
         if ($Region -notin @("na", "eu", "ap", "kr", "latam", "br")) { throw "Unknown region '$Region'." }
         Set-Region $Region
         Ok "Region saved: $Region."
-    } elseif ($saved) {
+    }
+    elseif ($saved) {
         Note "Region already set ($saved) - keeping it. (Edit backend\.env to change it.)"
-    } elseif (Test-StdinInteractive) {
+    }
+    elseif (Test-StdinInteractive) {
         $regions = @(
             @{ n = "North America"; k = "na" },
-            @{ n = "Europe";        k = "eu" },
-            @{ n = "Asia Pacific";  k = "ap" },
-            @{ n = "Korea";         k = "kr" },
+            @{ n = "Europe"; k = "eu" },
+            @{ n = "Asia Pacific"; k = "ap" },
+            @{ n = "Korea"; k = "kr" },
             @{ n = "Latin America"; k = "latam" },
-            @{ n = "Brazil";        k = "br" }
+            @{ n = "Brazil"; k = "br" }
         )
         Step "Select your region (so we talk to the right Riot servers):"
         for ($i = 0; $i -lt $regions.Count; $i++) {
@@ -80,14 +85,17 @@ try {
             $r = (Read-Host "  Enter a number (1-$($regions.Count))").Trim()
             if ($r -match '^\d+$' -and [int]$r -ge 1 -and [int]$r -le $regions.Count) {
                 $choice = $regions[[int]$r - 1]
-            } elseif (-not $r) {
+            }
+            elseif (-not $r) {
 
                 if (++$blanks -ge 5) { throw "No region was selected. Run install.bat again and enter a number (1-$($regions.Count))." }
-            } else { $blanks = 0; Warn2 "Please enter a number between 1 and $($regions.Count)." }
+            }
+            else { $blanks = 0; Warn2 "Please enter a number between 1 and $($regions.Count)." }
         }
         Set-Region $choice.k
         Ok "Region saved: $($choice.n) ($($choice.k))."
-    } else {
+    }
+    else {
         throw "No region is set and there is no console to ask. Re-run as: install.ps1 -Region na (or eu/ap/kr/latam/br)."
     }
 
@@ -99,14 +107,16 @@ try {
     Ok "Setup complete!"
     Write-Host "  Launch the app any time with start.bat (or the Valorant Scout desktop shortcut)." -ForegroundColor Green
     exit 0
-} catch {
+}
+catch {
     Write-Host ""
     Fail "Setup failed: $($_.Exception.Message)"
     Write-ScoutLog -Log install -Level ERROR -Code VS-INSTALL-001 -Message $_.Exception.Message
     Write-Host "  Fix the issue above and run install.bat again." -ForegroundColor Yellow
     Write-Host "  (Details: $(Join-Path $ScoutDir 'install.log'))" -ForegroundColor DarkGray
     exit 1
-} finally {
+}
+finally {
     Close-ScoutMutex $appMutex
     Close-ScoutMutex $maintenanceMutex
     if ($lock) { $lock.Close() }

@@ -1,0 +1,3 @@
+[scout]
+	maxCommits = 5
+	baseBranch = main
