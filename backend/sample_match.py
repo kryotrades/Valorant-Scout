@@ -357,20 +357,136 @@ def encounters(seed: int = 7) -> list:
         ww, lw = rng.randint(0, 3), rng.randint(0, 3)
         wa, la = rng.randint(0, 3), rng.randint(0, 5)
         tier = rng.randint(8, 24)
+        rank = rank_from_tier(tier)
+        top_agent = rng.choice(_AGENT_NAMES)
+        agent = resolve_agent(top_agent) or {}
+        if i < 5:
+            ww, lw = max(2, ww), max(1, lw)
+        if i < 6:
+            wa, la = max(1, wa), max(2, la)
         out.append({
             "puuid": _puuid(rng), "name": _name(rng),
             "withCount": ww + lw, "againstCount": wa + la,
             "winsWith": ww, "lossesWith": lw,
             "winsAgainst": wa, "lossesAgainst": la,
-            "rank": rank_from_tier(tier)["name"],
+            "rank": rank["name"], "rankTier": tier,
+            "rankColor": rank["color"], "rankIcon": valapi.rank_icon(tier),
             "peakRank": rank_from_tier(min(27, tier + rng.randint(0, 3)))["name"],
             "kd": round(rng.uniform(0.7, 1.7), 2),
             "winRate": rng.randint(38, 64),
+            "withKd": round(rng.uniform(0.75, 1.55), 2),
+            "withAcs": rng.randint(145, 285),
+            "withHsPct": rng.randint(14, 38),
+            "againstKd": round(rng.uniform(0.75, 1.7), 2),
+            "againstAcs": rng.randint(145, 300),
+            "againstHsPct": rng.randint(14, 40),
             "level": rng.randint(20, 400),
             "lastSeen": now - rng.randint(1, 14) * 86400,
             "agents": rng.sample(_AGENT_NAMES, rng.randint(1, 3)),
+            "topAgent": top_agent, "topAgentGames": rng.randint(2, 7),
+            "topAgentPortrait": agent.get("portrait"),
+            "topAgentColor": agent.get("color", "#46E0A0"),
         })
     return out
+
+
+def performance(seed: int = 7, timezone_name: str | None = None,
+                account_puuid: str | None = None) -> dict:
+    alternate = account_puuid == "demo-alt"
+    if alternate:
+        seed += 11
+    rng = random.Random(seed * 29 + 17)
+    now = int(time.time())
+    tier, rr = 15, 34
+    points = []
+    for i in range(16):
+        won = rng.random() < 0.58
+        delta = rng.randint(15, 26) if won else -rng.randint(12, 22)
+        rr += delta
+        if rr >= 100:
+            tier, rr = min(27, tier + 1), rr - 100
+        elif rr < 0:
+            tier, rr = max(3, tier - 1), rr + 100
+        agent_name = rng.choice(_AGENT_NAMES)
+        agent = resolve_agent(agent_name) or {}
+        map_name = rng.choice(MAPS)
+        kills, deaths = rng.randint(12, 28), rng.randint(10, 22)
+        points.append({
+            "matchId": f"demo-performance-{seed}-{i}",
+            "ts": now - (15 - i) * 10800,
+            "map": map_name, "mode": "Competitive",
+            "result": "Victory" if won else "Defeat",
+            "resultExact": True, "delta": delta,
+            "tier": tier, "rr": rr, "seasonId": "demo-current-act",
+            "agent": agent_name, "agentPortrait": agent.get("portrait"),
+            "agentColor": agent.get("color", "#8B978F"),
+            "kills": kills, "deaths": deaths, "assists": rng.randint(3, 12),
+            "kd": round(kills / deaths, 2), "acs": rng.randint(165, 315),
+            "hsPct": rng.randint(16, 38), "partySize": rng.choice([1, 1, 2, 3]),
+        })
+
+    def summary(rows):
+        wins = sum(p["result"] == "Victory" for p in rows)
+        net = sum(p["delta"] for p in rows)
+        latest = rows[-1]
+        return {
+            "matches": len(rows), "wins": wins, "losses": len(rows) - wins,
+            "winRate": round(100 * wins / len(rows)), "net": net,
+            "currentTier": latest["tier"], "currentRr": latest["rr"],
+        }
+
+    active_points = points[-4:]
+    archive_points = points[4:10]
+    active = {
+        "id": "demo-session-active", "startedAt": active_points[0]["ts"],
+        "startTier": active_points[0]["tier"], "startRr": active_points[0]["rr"],
+        "points": active_points, "summary": summary(active_points),
+        "baseline": {"winRate": 52},
+    }
+    archived = {
+        "id": "demo-session-archive", "startedAt": archive_points[0]["ts"],
+        "endedAt": archive_points[-1]["ts"] + 2400,
+        "points": archive_points, "summary": summary(archive_points),
+    }
+    tiers = {p["tier"] for p in points}
+    maps = {p["map"] for p in points}
+    return {
+        "version": 3, "demo": True,
+        "accounts": [{"puuid": "demo-self", "riotId": "RiotMain#OCE"},
+                     {"puuid": "demo-alt", "riotId": "ScoutAlt#OCE"}],
+        "account": {"puuid": "demo-alt" if alternate else "demo-self",
+                    "riotId": "ScoutAlt#OCE" if alternate else "RiotMain#OCE",
+                    "timezone": timezone_name or "America/Los_Angeles"},
+        "points": points, "timezone": timezone_name or "America/Los_Angeles",
+        "dataQuality": {"exact": len(points), "estimated": 0},
+        "rankIcons": {str(t): valapi.rank_icon(t) for t in tiers},
+        "mapSplashes": {name: valapi.map_splash(name) for name in maps},
+        "sessions": {"active": active, "archive": [archived]},
+        "matchMeta": {}, "encounters": encounters(seed),
+    }
+
+
+def inventory_demo(seed: int = 7) -> dict:
+    rng = random.Random(seed * 43 + 5)
+    prices = [2475, 2175, 2175, 1775, 1775, 1775, 1275, 875]
+    top = []
+    for item, vp in zip(_weapons(rng)[:8], prices):
+        skin = item.get("skin") or {}
+        top.append({"name": f"{skin.get('name', 'Premium')} {item['weapon']}",
+                    "icon": skin.get("icon"), "vp": vp})
+    return {
+        "available": True, "demo": True, "totalVp": 74250,
+        "usdApprox": 742, "wallet": {"vp": 1675, "rad": 145},
+        "counts": {"skins": 48, "earned": 13},
+        "tiers": {
+            "Select": {"skins": 7, "vp": 6125},
+            "Deluxe": {"skins": 9, "vp": 11475},
+            "Premium": {"skins": 21, "vp": 37275},
+            "Exclusive": {"skins": 8, "vp": 17400},
+            "Ultra": {"skins": 1, "vp": 2475},
+        },
+        "recent": top[:3], "top": top,
+    }
 
 def career(puuid: str) -> dict:
     pass

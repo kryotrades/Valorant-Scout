@@ -1025,11 +1025,11 @@ class LiveMatch:
                 for row in ex.map(fetch_detail, mids):
                     if row:
                         matches.append(row)
-                        mate_puuids.update(m["puuid"] for m in row["teammates"])
+                        mate_puuids.update(m["puuid"] for m in row["teammates"] + row.get("opponents", []))
 
         names = self.reveal_names(list(mate_puuids)) if mate_puuids else {}
         for row in matches:
-            for mate in row["teammates"]:
+            for mate in row["teammates"] + row.get("opponents", []):
                 mate["name"] = names.get(mate["puuid"]) or _fallback_name(mate["puuid"])
 
         updates = {}
@@ -1091,16 +1091,21 @@ class LiveMatch:
         hits = hits_by_player.get(puuid, 0)
         heads = heads_by_player.get(puuid, 0)
         agent = resolve_agent((subj.get("characterId") or "")) or {}
-        teammates = []
+        teammates, opponents = [], []
         for player in players:
             player_id = player.get("subject")
-            if player.get("teamId") != team_id or player_id == puuid:
+            if not player_id or player_id == puuid or not team_id or team_id == "Neutral":
                 continue
             player_stats = player.get("stats", {}) or {}
             teammate_agent = resolve_agent(player.get("characterId") or "") or {}
             teammate_hits = hits_by_player.get(player_id, 0)
-            teammates.append({
+            roster = teammates if player.get("teamId") == team_id else opponents
+            tier = int(player.get("competitiveTier") or 0)
+            rank = rank_from_tier(tier)
+            roster.append({
                 "puuid": player_id,
+                "rankTier": tier, "rank": rank["name"], "rankColor": rank["color"],
+                "rankIcon": valapi.cached_rank_icon(tier),
                 "agent": teammate_agent.get("name", "Unknown"),
                 "agentPortrait": teammate_agent.get("portrait"),
                 "agentColor": teammate_agent.get("color", "#8B978F"),
@@ -1143,6 +1148,7 @@ class LiveMatch:
             "partySize": max(1, party_size),
             "scores": {tid: team.get("roundsWon", 0) for tid, team in teams.items()},
             "teammates": teammates,
+            "opponents": opponents,
         }
 
     def match_detail(self, match_id: str, subject: str | None = None) -> dict:

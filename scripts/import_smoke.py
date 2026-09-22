@@ -4,6 +4,7 @@ import sys
 REQUIRED = [
     "flask",
     "flask_cors",
+    "tzdata",
     "requests",
     "dotenv",
     "urllib3",

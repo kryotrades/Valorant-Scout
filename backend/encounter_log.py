@@ -54,20 +54,27 @@ _save()
 
 def _public_entry(source: dict) -> dict:
     row = dict(source)
-    stats = source.get("withStats") or {}
-    games = int(stats.get("games") or 0)
-    deaths = int(stats.get("deaths") or 0)
-    hits = int(stats.get("shotsHit") or 0)
-    if games:
-        row["withKd"] = round(int(stats.get("kills") or 0) / deaths, 2) if deaths else float(int(stats.get("kills") or 0))
-        row["withAcs"] = round(float(stats.get("acsTotal") or 0) / games)
-        row["withHsPct"] = round(100 * int(stats.get("headshots") or 0) / hits) if hits else None
-        row["withStatGames"] = games
+    for side in ("with", "against"):
+        stats = source.get(f"{side}Stats") or {}
+        games = int(stats.get("games") or 0)
+        deaths = int(stats.get("deaths") or 0)
+        hits = int(stats.get("shotsHit") or 0)
+        if games:
+            row[f"{side}Kd"] = round(int(stats.get("kills") or 0) / deaths, 2) if deaths else float(int(stats.get("kills") or 0))
+            row[f"{side}Acs"] = round(float(stats.get("acsTotal") or 0) / games)
+            row[f"{side}HsPct"] = round(100 * int(stats.get("headshots") or 0) / hits) if hits else None
+            row[f"{side}StatGames"] = games
     agent_counts = source.get("agentCounts") or {}
     if agent_counts:
         top_agent = max(agent_counts, key=lambda name: (int(agent_counts.get(name) or 0), name))
         row["topAgent"] = top_agent
         row["topAgentGames"] = int(agent_counts.get(top_agent) or 0)
+        row["topAgentPortrait"] = (source.get("agentPortraits") or {}).get(top_agent)
+        row["topAgentColor"] = (source.get("agentColors") or {}).get(top_agent)
+    elif source.get("agents"):
+        top_agent = source["agents"][-1]
+        row["topAgent"] = top_agent
+        row["topAgentGames"] = 1
         row["topAgentPortrait"] = (source.get("agentPortraits") or {}).get(top_agent)
         row["topAgentColor"] = (source.get("agentColors") or {}).get(top_agent)
     return row
@@ -83,9 +90,13 @@ def record_board(board: dict | None) -> None:
         return
     owner = board.get("selfPuuid")
     match_id = board.get("matchId")
+    if match_id == "lobby" or board.get("state") not in (None, "INGAME"):
+        return
     if not owner or not match_id or not isinstance(board.get("players"), list):
         return
     self_team = board.get("selfTeam")
+    if not self_team or self_team == "Neutral":
+        return
     now = int(time.time())
     changed = False
     with _LOCK:
@@ -103,12 +114,13 @@ def record_board(board: dict | None) -> None:
             legacy_match_id = entry.get("lastMatchId")
             if legacy_match_id and legacy_match_id not in match_ids:
                 match_ids.append(legacy_match_id)
-            if match_id not in match_ids:
+            new_match = match_id not in match_ids
+            if new_match:
                 same_team = self_team is not None and player.get("team") == self_team
                 key = "withCount" if same_team else "againstCount"
                 entry[key] = int(entry.get(key) or 0) + 1
                 match_ids.append(match_id)
-                entry["matchIds"] = match_ids[-80:]
+                entry["matchIds"] = match_ids
                 entry["lastMatchId"] = match_id
             for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
                         "rankIcon", "rankColor", "kd", "winRate", "level"):
@@ -119,6 +131,15 @@ def record_board(board: dict | None) -> None:
             if agent and agent != "Unknown" and agent not in entry.setdefault("agents", []):
                 entry["agents"].append(agent)
                 entry["agents"] = entry["agents"][-8:]
+            if agent and agent != "Unknown":
+                if new_match:
+                    counts = entry.setdefault("agentCounts", {})
+                    counts[agent] = int(counts.get(agent) or 0) + 1
+                    entry.setdefault("agentMatchIds", []).append(match_id)
+                if player.get("agentPortrait"):
+                    entry.setdefault("agentPortraits", {})[agent] = player["agentPortrait"]
+                if player.get("agentColor"):
+                    entry.setdefault("agentColors", {})[agent] = player["agentColor"]
             changed = True
         if changed:
             _save()
@@ -152,7 +173,7 @@ def record_result(board: dict | None, won: bool | None) -> None:
                    else ("winsAgainst" if won else "lossesAgainst"))
             entry[key] = int(entry.get(key) or 0) + 1
             result_ids.append(match_id)
-            entry["resultMatchIds"] = result_ids[-80:]
+            entry["resultMatchIds"] = result_ids
             entry["lastResultMatchId"] = match_id
             timeline = entry.setdefault("timeline", [])
             timeline.append({"matchId": match_id, "at": int(time.time()),
@@ -169,95 +190,89 @@ def backfill_career(owner: str | None, matches: list[dict] | None) -> int:
     if not owner or not isinstance(matches, list):
         return 0
     changed = 0
-    dirty = False
     with _LOCK:
         store = _players(owner)
-        for match in matches:
-            if not isinstance(match, dict) or not match.get("matchId"):
+        for match in sorted(matches, key=lambda row: row.get("startMillis") or 0):
+            match_id = match.get("matchId")
+            if not match_id or match_id == "lobby":
                 continue
-            match_id = str(match["matchId"])
             result = match.get("result")
             seen_at = int((match.get("startMillis") or 0) / 1000) or int(time.time())
-            for teammate in match.get("teammates") or []:
-                if not isinstance(teammate, dict) or not teammate.get("puuid"):
+            participants = [("with", p) for p in match.get("teammates") or []]
+            participants += [("against", p) for p in match.get("opponents") or []]
+            for side, player in participants:
+                puuid = player.get("puuid")
+                if not puuid or puuid == owner:
                     continue
-                puuid = str(teammate["puuid"])
                 entry = store.setdefault(puuid, {
                     "puuid": puuid, "name": None, "withCount": 0, "againstCount": 0,
                     "winsWith": 0, "lossesWith": 0, "winsAgainst": 0, "lossesAgainst": 0,
                     "lastSeen": 0, "agents": [],
                 })
                 match_ids = entry.setdefault("matchIds", [])
-                for legacy in (entry.get("lastMatchId"),):
-                    if legacy and legacy not in match_ids:
-                        match_ids.append(legacy)
+                legacy = entry.get("lastMatchId")
+                if legacy and legacy not in match_ids:
+                    match_ids.append(legacy)
                 if match_id not in match_ids:
-                    entry["withCount"] = int(entry.get("withCount") or 0) + 1
+                    entry[f"{side}Count"] = int(entry.get(f"{side}Count") or 0) + 1
                     match_ids.append(match_id)
-                    entry["matchIds"] = match_ids[-80:]
                     changed += 1
-                    dirty = True
-
                 result_ids = entry.setdefault("resultMatchIds", [])
-                legacy_result = entry.get("lastResultMatchId")
-                if legacy_result and legacy_result not in result_ids:
-                    result_ids.append(legacy_result)
+                legacy = entry.get("lastResultMatchId")
+                if legacy and legacy not in result_ids:
+                    result_ids.append(legacy)
                 if result in ("Victory", "Defeat") and match_id not in result_ids:
-                    key = "winsWith" if result == "Victory" else "lossesWith"
+                    key = ("wins" if result == "Victory" else "losses") + side.title()
                     entry[key] = int(entry.get(key) or 0) + 1
                     result_ids.append(match_id)
-                    entry["resultMatchIds"] = result_ids[-80:]
-                    dirty = True
-
-                if teammate.get("name"):
-                    if entry.get("name") != teammate["name"]:
-                        entry["name"] = teammate["name"]
-                        dirty = True
-                for key in ("rank", "peakRank", "kd", "winRate", "level"):
-                    if teammate.get(key) is not None and entry.get(key) != teammate.get(key):
-                        entry[key] = teammate.get(key)
-                        dirty = True
-                previous_seen = int(entry.get("lastSeen") or 0)
-                entry["lastSeen"] = max(previous_seen, seen_at)
-                dirty = dirty or entry["lastSeen"] != previous_seen
-                entry["lastMatchId"] = match_id
-                if result in ("Victory", "Defeat"):
                     entry["lastResultMatchId"] = match_id
-                agent = teammate.get("agent")
-                if agent and agent != "Unknown" and agent not in entry.setdefault("agents", []):
-                    entry["agents"].append(agent)
-                    entry["agents"] = entry["agents"][-8:]
-                    dirty = True
-                stat_match_ids = entry.setdefault("withStatMatchIds", [])
-                if match_id not in stat_match_ids:
-                    stats = entry.setdefault("withStats", {
-                        "games": 0, "kills": 0, "deaths": 0, "assists": 0,
-                        "acsTotal": 0, "shotsHit": 0, "headshots": 0,
-                    })
-                    stats["games"] = int(stats.get("games") or 0) + 1
-                    for field in ("kills", "deaths", "assists", "shotsHit", "headshots"):
-                        stats[field] = int(stats.get(field) or 0) + int(teammate.get(field) or 0)
-                    stats["acsTotal"] = float(stats.get("acsTotal") or 0) + float(teammate.get("acs") or 0)
-                    stat_match_ids.append(match_id)
-                    entry["withStatMatchIds"] = stat_match_ids[-80:]
-                    if agent and agent != "Unknown":
+
+                if seen_at >= int(entry.get("lastSeen") or 0):
+                    for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
+                                "rankIcon", "rankColor", "kd", "winRate", "level"):
+                        if player.get(key) is not None:
+                            entry[key] = player[key]
+                    entry["lastSeen"] = seen_at
+                    entry["lastMatchId"] = match_id
+                else:
+                    for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
+                                "rankIcon", "rankColor", "level"):
+                        if entry.get(key) is None and player.get(key) is not None:
+                            entry[key] = player[key]
+                agent = player.get("agent")
+                if agent and agent != "Unknown":
+                    if agent not in entry.setdefault("agents", []):
+                        entry["agents"] = (entry["agents"] + [agent])[-8:]
+                    agent_ids = entry.setdefault("agentMatchIds", [])
+                    if not agent_ids:
+                        agent_ids.extend(entry.get("withStatMatchIds") or [])
+                    if match_id not in agent_ids:
                         counts = entry.setdefault("agentCounts", {})
                         counts[agent] = int(counts.get(agent) or 0) + 1
-                        if teammate.get("agentPortrait"):
-                            entry.setdefault("agentPortraits", {})[agent] = teammate["agentPortrait"]
-                        if teammate.get("agentColor"):
-                            entry.setdefault("agentColors", {})[agent] = teammate["agentColor"]
-                    dirty = True
+                        agent_ids.append(match_id)
+                    if player.get("agentPortrait"):
+                        entry.setdefault("agentPortraits", {})[agent] = player["agentPortrait"]
+                    if player.get("agentColor"):
+                        entry.setdefault("agentColors", {})[agent] = player["agentColor"]
+
+                stat_ids = entry.setdefault(f"{side}StatMatchIds", [])
+                if match_id not in stat_ids:
+                    stats = entry.setdefault(f"{side}Stats", {})
+                    stats["games"] = int(stats.get("games") or 0) + 1
+                    for key in ("kills", "deaths", "assists", "shotsHit", "headshots"):
+                        stats[key] = int(stats.get(key) or 0) + int(player.get(key) or 0)
+                    stats["acsTotal"] = float(stats.get("acsTotal") or 0) + float(player.get("acs") or 0)
+                    stat_ids.append(match_id)
                 timeline = entry.setdefault("timeline", [])
-                if not any(item.get("matchId") == match_id for item in timeline):
-                    timeline.append({"matchId": match_id, "at": seen_at, "side": "with",
-                                     "result": "win" if result == "Victory" else
-                                               "loss" if result == "Defeat" else None,
-                                     "agent": agent, "map": match.get("map")})
-                    entry["timeline"] = sorted(timeline, key=lambda item: item.get("at") or 0)[-40:]
-                    dirty = True
-        if dirty:
-            _save()
+                item = next((item for item in timeline if item.get("matchId") == match_id), None)
+                if item is None:
+                    item = {"matchId": match_id}
+                    timeline.append(item)
+                item.update({"at": seen_at, "side": side,
+                             "result": "win" if result == "Victory" else "loss" if result == "Defeat" else None,
+                             "agent": agent, "map": match.get("map")})
+                entry["timeline"] = sorted(timeline, key=lambda item: item.get("at") or 0)[-40:]
+        _save()
     return changed
 
 
@@ -317,10 +332,11 @@ def get_all_accounts(current_owner: str | None = None, limit: int = 200) -> list
                 row["timeline"] = sorted((row.get("timeline") or []) +
                                          (source.get("timeline") or []),
                                          key=lambda item: item.get("at") or 0)[-40:]
-                source_stats = source.get("withStats") or {}
-                stats = row.setdefault("withStats", {})
-                for key in ("games", "kills", "deaths", "assists", "acsTotal", "shotsHit", "headshots"):
-                    stats[key] = float(stats.get(key) or 0) + float(source_stats.get(key) or 0)
+                for side in ("with", "against"):
+                    source_stats = source.get(f"{side}Stats") or {}
+                    stats = row.setdefault(f"{side}Stats", {})
+                    for key in ("games", "kills", "deaths", "assists", "acsTotal", "shotsHit", "headshots"):
+                        stats[key] = float(stats.get(key) or 0) + float(source_stats.get(key) or 0)
                 counts = row.setdefault("agentCounts", {})
                 for agent, count in (source.get("agentCounts") or {}).items():
                     counts[agent] = int(counts.get(agent) or 0) + int(count or 0)

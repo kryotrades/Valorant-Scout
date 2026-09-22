@@ -307,16 +307,19 @@ def observe(board: dict, lm) -> None:
         _STATE["prev_state"] = state
         owner = getattr(lm, "self_puuid", None) or board.get("selfPuuid")
         _STATE["active_puuid"] = owner
+        previous_board = _STATE.get("ingame_board")
+        if previous_board and previous_board.get("selfPuuid") not in (None, owner):
+            _STATE["ingame_board"] = None
+            _STATE["recap"] = None
         if state == "INGAME" and board.get("matchId"):
             _STATE["ingame_board"] = board
             return
         if state == "PREGAME":
             _STATE["recap"] = None
             return
-        if state != "MENUS" or prev != "INGAME":
+        if state != "MENUS":
             return
         snap = _STATE["ingame_board"]
-        _STATE["ingame_board"] = None
         if not snap:
             return
         match_id = snap.get("matchId")
@@ -328,15 +331,26 @@ def observe(board: dict, lm) -> None:
             generation = _STATE["generation"]
 
         def finish():
+            completed = False
             try:
-                recap = _build_recap(lm, snap)
+                recap = None
+                for delay in (0, 2, 5):
+                    if delay:
+                        time.sleep(delay)
+                    recap = _build_recap(lm, snap)
+                    if recap:
+                        break
                 if not recap:
                     return
                 won = {"Victory": True, "Defeat": False}.get(recap.get("result"))
                 encounter_log.record_result(snap, won)
                 point = _point_from_recap(recap)
                 history.record(point, puuid=recap.get("puuid"), riot_id=recap.get("riotId"))
+                history.invalidate(owner)
+                completed = True
                 with _LOCK:
+                    if _STATE.get("ingame_board") is snap:
+                        _STATE["ingame_board"] = None
                     if generation == _STATE["generation"]:
                         _STATE["recap"] = recap
                         _STATE["recap_at"] = time.time()
@@ -344,6 +358,10 @@ def observe(board: dict, lm) -> None:
                             _push_session_point(recap)
             except Exception:
                 pass
+            finally:
+                if not completed:
+                    with _LOCK:
+                        _STATE["recorded"].discard(key)
 
         threading.Thread(target=finish, daemon=True, name=f"recap-{str(match_id)[:8]}").start()
     except Exception:

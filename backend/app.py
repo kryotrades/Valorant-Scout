@@ -45,6 +45,8 @@ _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = float(os.getenv("PLAYER_CACHE_TTL", "60"))
 _ENCOUNTER_BACKFILL_AT: dict[str, float] = {}
 _ENCOUNTER_BACKFILL_LOCK = threading.Lock()
+_ENCOUNTER_JOBS: set[str] = set()
+_ENCOUNTER_JOBS_LOCK = threading.Lock()
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "data", "settings.json")
 _SETTINGS_LOCK = threading.Lock()
@@ -236,6 +238,8 @@ def build_live(seed: int = 7, want_state: str | None = None) -> dict:
                 )
                 board.setdefault("sourceDetail", "Local VALORANT client")
                 board["selfPuuid"] = lm.self_puuid
+                self_player = next((p for p in board.get("players", []) if p.get("isSelf")), {})
+                history.remember_account(lm.self_puuid, self_player.get("name"))
 
                 try:
                     session_tracker.observe(board, lm)
@@ -269,8 +273,11 @@ def build_live(seed: int = 7, want_state: str | None = None) -> dict:
                             "error": str(e), "players": [], "teams": {}, "parties": [],
                             "notice": notice, "appVersion": APP_VERSION}
     elif client.source_pref != "demo" and not LocalAuth.available():
-
         notice = _client_notice()
+    elif client.source_pref == "demo":
+        notice = {"level": "warn", "action": "restart_game",
+                  "message": "Couldn't read VALORANT — please restart your game "
+                             "(close it completely and relaunch), then try again."}
 
     board = (sample_match.generate_lobby(seed)
              if (want_state or "").lower() == "menus"
@@ -313,13 +320,15 @@ def _refresh_encounter_history(owner: str | None) -> None:
         _ENCOUNTER_BACKFILL_AT[owner] = now
         try:
             lm = live_match.LiveMatch(LocalAuth())
-            career = lm.player_career(owner, count=10)
+            if lm.self_puuid != owner:
+                return
+            career = lm.player_career(owner, count=20)
             encounter_log.backfill_career(owner, career.get("matches") or [])
 
             season = lm.season_id()
             previous_season = lm.prev_season_id()
-            for teammate in (career.get("coPlayers") or [])[:6]:
-                if int(teammate.get("sharedMatches") or 0) < 2:
+            for teammate in encounter_log.get_all(owner)[:12]:
+                if int(teammate.get("withCount") or 0) + int(teammate.get("againstCount") or 0) < 2:
                     continue
                 puuid = teammate.get("puuid")
                 if not puuid:
@@ -345,16 +354,36 @@ def _refresh_encounter_history(owner: str | None) -> None:
 
 @app.get("/api/encounters")
 def encounters():
-    pass
-    if client.source_pref == "demo":
-        return jsonify({"players": sample_match.encounters(), "accountCount": 1,
-                        "scope": request.args.get("scope", "current")})
+    return jsonify(_encounters_payload(request.args.get("scope", "current"),
+                                       request.args.get("demo") == "1"))
+
+
+def _encounters_payload(scope: str = "current", demo: bool = False) -> dict:
+    if demo or client.source_pref == "demo":
+        return {"players": sample_match.encounters(), "accountCount": 1, "scope": scope}
     owner = _current_puuid()
-    _refresh_encounter_history(owner)
-    scope = "all" if request.args.get("scope") == "all" else "current"
-    return jsonify({"players": encounter_log.get_all_accounts(owner) if scope == "all"
+    if owner:
+        with _ENCOUNTER_JOBS_LOCK:
+            if owner not in _ENCOUNTER_JOBS and time.time() - _ENCOUNTER_BACKFILL_AT.get(owner, 0) >= 600:
+                _ENCOUNTER_JOBS.add(owner)
+
+                def refresh_encounters():
+                    try:
+                        _refresh_encounter_history(owner)
+                    finally:
+                        with _ENCOUNTER_JOBS_LOCK:
+                            _ENCOUNTER_JOBS.discard(owner)
+
+                threading.Thread(target=refresh_encounters, daemon=True,
+                                 name=f"encounters-{str(owner)[:8]}").start()
+    scope = "all" if scope == "all" else "current"
+    payload = {"players": encounter_log.get_all_accounts(owner) if scope == "all"
                     else encounter_log.get_all(owner),
-                    "accountCount": encounter_log.account_count(), "scope": scope})
+               "accountCount": encounter_log.account_count(), "scope": scope}
+    if owner:
+        with _ENCOUNTER_JOBS_LOCK:
+            payload["refreshing"] = owner in _ENCOUNTER_JOBS
+    return payload
 
 @app.get("/api/recap")
 def recap():
@@ -434,23 +463,60 @@ def _insights_payload(timezone_name: str | None = None) -> dict:
     return history.payload(puuid, timezone_name)
 
 
-def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20) -> dict:
-    payload = _insights_payload(timezone_name)
-    owner = (payload.get("account") or {}).get("puuid")
-    if owner and _live_enabled():
-        def enrich_recent():
-            try:
-                history.enrich(live_match.LiveMatch(LocalAuth()), owner, rich_limit)
-            except Exception:
-                app.logger.exception("performance enrichment failed")
-        threading.Thread(target=enrich_recent, daemon=True,
-                         name=f"perf-enrich-{str(owner)[:8]}").start()
-    if owner:
+_PERFORMANCE_JOBS: set[str] = set()
+_PERFORMANCE_LOCK = threading.Lock()
+
+
+def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20,
+                         demo: bool = False, account_puuid: str | None = None) -> dict:
+    if client.source_pref == "demo" or (demo and (not account_puuid or account_puuid.startswith("demo-"))):
+        payload = (sample_match.performance(timezone_name=timezone_name, account_puuid=account_puuid)
+                   if account_puuid else sample_match.performance(timezone_name=timezone_name))
+        if client.source_pref != "demo":
+            payload["accounts"] = payload.get("accounts", []) + history.saved_accounts()
+        return payload
+    current = _current_puuid()
+    if current:
+        history.remember_account(current)
+    accounts = history.saved_accounts()
+    known = {account["puuid"] for account in accounts}
+    if account_puuid and account_puuid not in known:
+        return {"error": "This account has no saved performance on this installation."}
+    owner = account_puuid or current or next(iter(accounts), {}).get("puuid")
+    if owner and owner == current:
+        with _PERFORMANCE_LOCK:
+            if owner not in _PERFORMANCE_JOBS and history.refresh_due(owner):
+                _PERFORMANCE_JOBS.add(owner)
+
+                def refresh_account():
+                    try:
+                        auth = LocalAuth()
+                        auth.headers()
+                        if auth.puuid != owner:
+                            return
+                        history.refresh(auth, timezone_name)
+                        history.enrich(live_match.LiveMatch(auth), owner, rich_limit)
+                    except Exception:
+                        app.logger.exception("performance refresh failed")
+                    finally:
+                        with _PERFORMANCE_LOCK:
+                            _PERFORMANCE_JOBS.discard(owner)
+
+                threading.Thread(target=refresh_account, daemon=True,
+                                 name=f"performance-{str(owner)[:8]}").start()
+    payload = history.payload(owner, timezone_name)
+    if owner and owner == current:
         session_tracker.ensure_active(owner, payload.get("summary", {}))
+    payload["accounts"] = accounts
+    payload["currentAccountPuuid"] = current
+    payload["isCurrentAccount"] = bool(owner and owner == current)
+    with _PERFORMANCE_LOCK:
+        payload["refreshing"] = owner in _PERFORMANCE_JOBS
     payload["sessions"] = session_tracker.list_for(owner)
     payload["matchMeta"] = match_meta.get_all(owner)
     payload["encounters"] = encounter_log.get_all(owner)
     return payload
+
 
 @app.get("/api/insights")
 def insights():
@@ -463,9 +529,12 @@ def performance():
         rich_limit = int(request.args.get("richLimit", 20))
     except (TypeError, ValueError):
         rich_limit = 20
-    return jsonify(_performance_payload(request.args.get("tz"), rich_limit))
+    return jsonify(_performance_payload(request.args.get("tz"), rich_limit,
+                                        request.args.get("demo") == "1", request.args.get("account")))
 
-def _inventory_payload() -> dict:
+def _inventory_payload(demo: bool = False) -> dict:
+    if demo or client.source_pref == "demo":
+        return sample_match.inventory_demo()
     if not _live_enabled():
         return {
             "available": False,
@@ -496,7 +565,7 @@ def _inventory_payload() -> dict:
 
 @app.get("/api/inventory")
 def inventory_route():
-    return jsonify(_inventory_payload())
+    return jsonify(_inventory_payload(request.args.get("demo") == "1"))
 
 @app.get("/api/encounters/<puuid>")
 def encounter(puuid: str):
@@ -762,18 +831,14 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             return live_recap or sample_match.recap(int(params.get("seed") or 7))
 
         if req_type == "encounters":
-            owner = _current_puuid()
-            _refresh_encounter_history(owner)
-            scope = "all" if params.get("scope") == "all" else "current"
-            return {"players": encounter_log.get_all_accounts(owner) if scope == "all"
-                    else encounter_log.get_all(owner),
-                    "accountCount": encounter_log.account_count(), "scope": scope}
+            return _encounters_payload(params.get("scope", "current"), bool(params.get("demo")))
 
         if req_type == "insights":
             return _insights_payload(params.get("tz"))
 
         if req_type == "performance":
-            return _performance_payload(params.get("tz"), int(params.get("richLimit") or 20))
+            return _performance_payload(params.get("tz"), int(params.get("richLimit") or 20),
+                                        bool(params.get("demo")), params.get("account"))
 
         if req_type == "sessions":
             return session_tracker.list_for(_current_puuid())
@@ -782,7 +847,7 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             return match_meta.get_one(_current_puuid(), (params.get("matchId") or "").strip())
 
         if req_type == "inventory":
-            return _inventory_payload()
+            return _inventory_payload(bool(params.get("demo")))
     except Exception as e:
         return {"error": f"request failed: {e}"}
     return {"error": f"unknown request '{req_type}'"}

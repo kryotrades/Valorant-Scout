@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import base64
+import os
 import threading
 import time
 
 from riot_client import LocalAuth
 
 _CID_PARTS = ("MTAxMjQwMjIx", "MTEzNDkxMDU0Ng==")
-_CLIENT_ID = (base64.b64decode(_CID_PARTS[0]).decode()
+_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID") or (base64.b64decode(_CID_PARTS[0]).decode()
               + base64.b64decode(_CID_PARTS[1]).decode())
 
 _UPDATE_SECS = 15
@@ -80,7 +81,20 @@ def maybe_start(region: str | None = None) -> None:
     _worker = _Worker(region)
     _worker.start()
 
-_BUTTONS = [{"label": "Get Valorant Scout", "url": "https://github.com/kryotrades/valorant-scout"}]
+_SITE_URL = "https://valorantscout.com"
+_BUTTONS = [{"label": "Valorant Scout", "url": _SITE_URL}]
+
+
+def _rpc_payload(payload: dict):
+    from pypresence.payloads import Payload
+    fields = {**payload, "name": "Valorant Scout", "buttons": _BUTTONS}
+    if fields.get("start"):
+        fields["start"] = int(fields["start"]) * 1000
+    wire = Payload.set_activity(**fields)
+    activity = wire.data["args"]["activity"]
+    activity.update(details_url=_SITE_URL, state_url=_SITE_URL)
+    activity.setdefault("assets", {}).update(large_url=_SITE_URL, small_url=_SITE_URL)
+    return wire
 
 class _Worker:
     def __init__(self, region: str | None):
@@ -107,6 +121,9 @@ class _Worker:
         while True:
             try:
                 if not LocalAuth.available():
+                    if rpc is not None and last_payload is not None:
+                        rpc.clear()
+                        last_payload = None
                     time.sleep(_UPDATE_SECS)
                     continue
                 if rpc is None:
@@ -121,7 +138,7 @@ class _Worker:
                         rpc.clear()
                         last_payload = None
                 elif payload != last_payload:
-                    rpc.update(**payload)
+                    rpc.update(payload_override=_rpc_payload(payload))
                     last_payload = payload
                 time.sleep(_UPDATE_SECS)
             except Exception as e:

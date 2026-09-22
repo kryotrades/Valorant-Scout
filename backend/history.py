@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -97,7 +97,10 @@ def _valid_timezone(name: str | None) -> tuple[str, ZoneInfo]:
             return candidate, ZoneInfo(candidate)
         except (ZoneInfoNotFoundError, ValueError):
             pass
-    return "UTC", ZoneInfo("UTC")
+    try:
+        return "UTC", ZoneInfo("UTC")
+    except ZoneInfoNotFoundError:
+        return "UTC", timezone.utc
 
 
 def _quality(point: dict) -> int:
@@ -163,8 +166,42 @@ def record(point: dict, puuid: str | None = None, riot_id: str | None = None,
         return
     with _LOCK:
         account = _ensure_account(str(owner), riot_id or point.get("riotId"), timezone_name)
+        if not any(p.get("matchId") == point.get("matchId") for p in account.get("points", [])):
+            _enrich_at.pop(str(owner), None)
         account["points"] = _upsert_points(account.get("points", []), point, source)
         _save()
+
+
+def remember_account(puuid: str | None, riot_id: str | None = None) -> None:
+    if not puuid or str(puuid).startswith("demo"):
+        return
+    with _LOCK:
+        _ensure_account(puuid, riot_id)
+        _save()
+
+
+def saved_accounts() -> list[dict]:
+    with _LOCK:
+        rows = [{"puuid": puuid, "riotId": account.get("riotId"),
+                 "matches": len(account.get("points") or []),
+                 "lastSeenAt": account.get("lastSeenAt", 0)}
+                for puuid, account in _STORE.get("accounts", {}).items()]
+    return sorted(rows, key=lambda row: row["lastSeenAt"], reverse=True)
+
+
+def refresh_due(puuid: str) -> bool:
+    with _LOCK:
+        now = time.time()
+        points = (_STORE.get("accounts", {}).get(puuid) or {}).get("points", [])[-20:]
+        missing = any(p.get("acs") is None or p.get("scores") is None or p.get("partySize") is None for p in points)
+        return (now - _refresh_at.get(puuid, 0) >= _REFRESH_TTL or
+                (missing and now - _enrich_at.get(puuid, 0) >= _REFRESH_TTL))
+
+
+def invalidate(puuid: str) -> None:
+    with _LOCK:
+        _refresh_at.pop(puuid, None)
+        _enrich_at.pop(puuid, None)
 
 
 def refresh(auth, timezone_name: str | None = None) -> str | None:
@@ -248,6 +285,9 @@ def enrich(live_match, puuid: str, limit: int = 20) -> int:
                       if p.get("matchId") and (p.get("acs") is None
                                                or p.get("scores") is None
                                                or p.get("partySize") is None)]
+        if not candidates:
+            _enrich_at.pop(puuid, None)
+            return sum(p.get("acs") is not None for p in account.get("points", [])[-limit:])
 
     def fetch(point):
         try:
@@ -506,9 +546,7 @@ def _act_comparison(points: list[dict]) -> dict | None:
 def payload(puuid: str | None = None, timezone_name: str | None = None) -> dict:
     zone_name, zone = _valid_timezone(timezone_name)
     with _LOCK:
-        account = _ensure_account(puuid, timezone_name=timezone_name) if puuid else {}
-        if puuid:
-            _save()
+        account = (_STORE.get("accounts", {}).get(puuid) or {}) if puuid else {}
         points = list(account.get("points", []))
         if not timezone_name:
             zone_name, _ = _valid_timezone(account.get("timezone"))

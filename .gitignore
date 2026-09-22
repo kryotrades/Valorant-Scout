@@ -28,7 +28,13 @@ dist/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+frontend/.next-dev.*.log
 npm-debug.log*
+
+# Local browser/testing output
+/.playwright-cli/
+/output/
+backend/.local.*.log
 
 # Reference clones (logic already integrated into backend/)
 vendor/
