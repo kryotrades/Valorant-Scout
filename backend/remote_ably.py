@@ -19,6 +19,17 @@ except Exception:
 def _log(msg: str) -> None:
     print(f"[remote] {msg}", flush=True)
 
+_CONNECT_TIMEOUT = 10.0
+_PUBLISH_ERR_EVERY = 30.0
+_last_publish_err = 0.0
+
+def _log_publish_error(e: BaseException) -> None:
+    global _last_publish_err
+    now = time.monotonic()
+    if now - _last_publish_err >= _PUBLISH_ERR_EVERY:
+        _last_publish_err = now
+        _log(f"state publish failed: {e}")
+
 def _slim_for_ably(board: dict) -> dict:
     if not isinstance(board, dict):
         return board
@@ -124,9 +135,8 @@ class RemoteController:
             self._session = sess
             t.start()
 
-            ready.wait(timeout=10)
-            if sess["err"].get("error"):
-                msg = sess["err"]["error"]
+            if not ready.wait(timeout=_CONNECT_TIMEOUT) or sess["err"].get("error"):
+                msg = sess["err"].get("error") or "timed out connecting"
                 self._teardown_locked()
                 return {"ok": False, "message": f"Ably connect failed: {msg}"}
 
@@ -149,9 +159,13 @@ class RemoteController:
         if sess:
             loop = sess.get("loop")
             stop = sess.get("stop")
-            if loop is not None and stop is not None:
+            task = sess.get("task")
+            if loop is not None:
                 try:
-                    loop.call_soon_threadsafe(stop.set)
+                    if stop is not None:
+                        loop.call_soon_threadsafe(stop.set)
+                    if task is not None and not sess["ready"].is_set():
+                        loop.call_soon_threadsafe(task.cancel)
                 except Exception:
                     pass
         _log("remote mode disabled")
@@ -172,21 +186,47 @@ class RemoteController:
         ch = sess.get("state_ch")
         if loop is None or ch is None:
             return
+        def _done(fut):
+            if not fut.cancelled() and fut.exception() is not None:
+                _log_publish_error(fut.exception())
+
         try:
             asyncio.run_coroutine_threadsafe(
-                ch.publish("state", _slim_for_ably(board)), loop)
-        except Exception:
-            pass
+                ch.publish("state", _slim_for_ably(board)), loop
+            ).add_done_callback(_done)
+        except Exception as e:
+            _log_publish_error(e)
+
+    async def _publish_board(self, state_ch) -> None:
+        try:
+            board = await asyncio.get_running_loop().run_in_executor(
+                None, self.board_provider)
+            await state_ch.publish("state", _slim_for_ably(board))
+        except Exception as e:
+            _log_publish_error(e)
 
     def _agent_thread(self, sess: dict) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         sess["loop"] = loop
+        task = loop.create_task(self._agent_main(sess))
+        sess["task"] = task
         try:
-            loop.run_until_complete(self._agent_main(sess))
-        except Exception as e:
-            sess["err"]["error"] = str(e)
+            loop.run_until_complete(task)
+        except (Exception, asyncio.CancelledError) as e:
+            sess["err"]["error"] = str(e) or type(e).__name__
             sess["ready"].set()
+            client = sess.get("client")
+            if client is not None:
+                try:
+                    loop.run_until_complete(client.close())
+                except (Exception, asyncio.CancelledError):
+                    pass
+            with self._lock:
+                if self._session is sess:
+                    self._session = None
+                    self._active = False
+                    _log(f"remote agent stopped: {sess['err']['error']}")
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -228,11 +268,7 @@ class RemoteController:
                     sess["phone_seen"] = True
 
                     if action in ("enter", "present", ""):
-                        try:
-                            await state_ch.publish(
-                                "state", _slim_for_ably(self.board_provider()))
-                        except Exception:
-                            pass
+                        await self._publish_board(state_ch)
             await state_ch.presence.subscribe(on_presence)
             for m in (await state_ch.presence.get()) or []:
                 if str(getattr(m, "client_id", "") or "").startswith("phone"):
@@ -243,10 +279,7 @@ class RemoteController:
 
         sess["ready"].set()
 
-        try:
-            await state_ch.publish("state", _slim_for_ably(self.board_provider()))
-        except Exception:
-            pass
+        await self._publish_board(state_ch)
 
         async def idle_watch():
             await asyncio.sleep(180)
@@ -258,11 +291,7 @@ class RemoteController:
         async def state_pump():
 
             while not stop.is_set():
-                try:
-                    await state_ch.publish(
-                        "state", _slim_for_ably(self.board_provider()))
-                except Exception:
-                    pass
+                await self._publish_board(state_ch)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=4.0)
                 except asyncio.TimeoutError:

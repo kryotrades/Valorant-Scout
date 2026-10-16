@@ -37,19 +37,21 @@ _CACHE: dict[str, dict] = {}
 
 _MATCH_META: dict[str, dict] = {}
 
-_LOBBY_CACHE: dict = {"key": None, "at": 0.0, "board": None}
+_LOBBY_CACHE: dict[bool, dict] = {}
 
 _LAST_BOARD: dict = {"board": None, "at": 0.0}
 _HOLD_SECS = 90.0
 
 _ACCT_CACHE: dict[str, str | None] = {}
+_ACCT_MISS = object()
 
 _ROUTING = {"na": "americas", "latam": "americas", "br": "americas",
             "eu": "europe", "ap": "asia", "kr": "asia"}
 
 _CONTENT_CACHE: dict = {"seasons": None, "at": 0.0}
 
-_LEVEL_CACHE: dict[str, int] = {}
+_LEVEL_CACHE: dict[str, tuple[int, float]] = {}
+_LEVEL_MISS_TTL = 600.0
 
 _KD_FILL_LOCK = threading.Lock()
 _KD_FILLING: set[str] = set()
@@ -300,8 +302,9 @@ class LiveMatch:
 
     def reveal_via_account_api(self, puuid: str) -> str | None:
         pass
-        if puuid in _ACCT_CACHE:
-            return _ACCT_CACHE[puuid]
+        hit = _ACCT_CACHE.get(puuid, _ACCT_MISS)
+        if hit is not _ACCT_MISS:
+            return hit
         key = os.getenv("RIOT_API_KEY", "").strip()
         if not key:
             return None
@@ -320,7 +323,7 @@ class LiveMatch:
                 _log("account-v1 rejected the key (check RIOT_API_KEY)")
         except Exception as e:
             _log(f"account-v1 lookup error: {e}")
-        _ACCT_CACHE[puuid] = name
+        _cache_put(_ACCT_CACHE, _KD_CACHE_MAX, puuid, name)
         return name
 
     def resolve_identity(self, puuid, name_service, ident):
@@ -469,6 +472,8 @@ class LiveMatch:
                     rank_key = mhit[0][0] if (mhit[0] and mhit[1]) else "nocomp"
                 else:
                     rank_key = None
+            if not season:
+                return hit[0] if hit else out
             if riot_client.held_secs("/mmr/") > 0:
                 return out
             r = self.auth.pd_get(f"/mmr/v1/players/{puuid}")
@@ -531,23 +536,31 @@ class LiveMatch:
 
     def level_from_history(self, puuid: str) -> int:
         pass
-        if puuid in _LEVEL_CACHE:
-            return _LEVEL_CACHE[puuid]
+        hit = _LEVEL_CACHE.get(puuid)
+        if hit and (hit[0] > 0 or time.time() - hit[1] < _LEVEL_MISS_TTL):
+            return hit[0]
         level = 0
+        throttled = False
         try:
             hist = self.auth.pd_get(
                 f"/match-history/v1/history/{puuid}?startIndex=0&endIndex=1")
+            throttled = _is_throttled(hist)
             entries = (hist or {}).get("History", []) if isinstance(hist, dict) else []
             mid = entries[0].get("MatchID") if entries else None
             if mid:
-                md = self.auth.pd_get(f"/match-details/v1/matches/{mid}")
+                md = _MATCH_DETAIL_CACHE.get(mid)
+                if md is None:
+                    md = self.auth.pd_get(f"/match-details/v1/matches/{mid}")
+                    throttled = throttled or _is_throttled(md)
+                    if isinstance(md, dict) and "players" in md:
+                        _cache_put(_MATCH_DETAIL_CACHE, _MATCH_DETAIL_MAX, mid, md)
                 pl = next((x for x in (md.get("players") or [])
                            if x.get("subject") == puuid), None)
                 level = int((pl or {}).get("accountLevel", 0) or 0)
         except Exception:
-            level = 0
-        if level > 0:
-            _LEVEL_CACHE[puuid] = level
+            level, throttled = 0, True
+        if not throttled:
+            _cache_put(_LEVEL_CACHE, _KD_CACHE_MAX, puuid, (level, time.time()))
         return level
 
     def kd_hs(self, puuid, count=3):
@@ -737,17 +750,19 @@ class LiveMatch:
 
         names = meta.get("names") or {}
         missing_names = [p for p in puuids if p not in names]
-        if missing_names and meta.get("name_tries", 0) < 8:
-            meta["name_tries"] = meta.get("name_tries", 0) + 1
+        tries_key = f"name_tries:{state}"
+        if missing_names and meta.get(tries_key, 0) < 8:
+            meta[tries_key] = meta.get(tries_key, 0) + 1
             names = {**names, **self.reveal_names(missing_names)}
             meta["names"] = names
-        if not meta.get("loadouts"):
+        ld_key = f"loadouts:{state}"
+        if not meta.get(ld_key):
             ld = self.loadouts(state, match_id)
             if ld:
-                meta["loadouts"] = ld
+                meta[ld_key] = ld
             weapons_by_puuid = ld
         else:
-            weapons_by_puuid = meta["loadouts"]
+            weapons_by_puuid = meta[ld_key]
 
         pmap = self.party_map(puuids, presences)
         party_lookup = {}
@@ -780,7 +795,7 @@ class LiveMatch:
                 if not rk.get("ok"):
 
                     cached["rank_at"] = time.time()
-                _CACHE[cache_key] = cached
+                _cache_put(_CACHE, _KD_CACHE_MAX, cache_key, cached)
                 if include_stats:
                     uncached_kd.append(puuid)
             else:
@@ -946,9 +961,10 @@ class LiveMatch:
 
         key = tuple(sorted(puuids))
         now = time.time()
-        if (_LOBBY_CACHE["board"] is not None and _LOBBY_CACHE["key"] == key
-                and now - _LOBBY_CACHE["at"] < 20):
-            return _LOBBY_CACHE["board"]
+        for slot in ((True,) if include_stats else (False, True)):
+            hit = _LOBBY_CACHE.get(slot)
+            if hit and hit["key"] == key and now - hit["at"] < 20:
+                return hit["board"]
 
         names = self.reveal_names(puuids)
 
@@ -999,7 +1015,7 @@ class LiveMatch:
                          map_name=None, queue="Lobby", match_id="lobby",
                          parties=parties_out)
         board["riotRequests"] = self.auth.req_count
-        _LOBBY_CACHE.update(key=key, at=now, board=board)
+        _LOBBY_CACHE[bool(include_stats)] = {"key": key, "at": now, "board": board}
         return board
 
     def player_career(self, puuid: str, count: int = 8) -> dict:

@@ -176,6 +176,10 @@ def remember_account(puuid: str | None, riot_id: str | None = None) -> None:
     if not puuid or str(puuid).startswith("demo"):
         return
     with _LOCK:
+        account = _STORE.get("accounts", {}).get(puuid)
+        if (account and (not riot_id or account.get("riotId") == riot_id)
+                and time.time() - account.get("lastSeenAt", 0) < 600):
+            return
         _ensure_account(puuid, riot_id)
         _save()
 
@@ -215,9 +219,11 @@ def refresh(auth, timezone_name: str | None = None) -> str | None:
 
     now = time.time()
     with _LOCK:
+        prev_tz = (_STORE.get("accounts", {}).get(puuid) or {}).get("timezone")
         account = _ensure_account(puuid, timezone_name=timezone_name)
         if now - _refresh_at.get(puuid, 0) < _REFRESH_TTL:
-            _save()
+            if account.get("timezone") != prev_tz:
+                _save()
             return puuid
         _refresh_at[puuid] = now
     try:
@@ -227,6 +233,8 @@ def refresh(auth, timezone_name: str | None = None) -> str | None:
                 f"/mmr/v1/players/{puuid}/competitiveupdates"
                 f"?startIndex={start}&endIndex={start + 20}&queue=competitive")
             if not isinstance(cu, dict) or cu.get("errorCode"):
+                if matches:
+                    break
                 code = cu.get("errorCode", "MMR_REQUEST_FAILED") if isinstance(cu, dict) else "MMR_REQUEST_FAILED"
                 raise RuntimeError(code)
             page = cu.get("Matches") or []
@@ -547,7 +555,7 @@ def payload(puuid: str | None = None, timezone_name: str | None = None) -> dict:
     zone_name, zone = _valid_timezone(timezone_name)
     with _LOCK:
         account = (_STORE.get("accounts", {}).get(puuid) or {}) if puuid else {}
-        points = list(account.get("points", []))
+        points = [dict(p) for p in account.get("points", [])]
         if not timezone_name:
             zone_name, _ = _valid_timezone(account.get("timezone"))
         account_info = {

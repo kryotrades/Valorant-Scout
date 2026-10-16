@@ -140,11 +140,6 @@ _RIOT_PROCS = [
 ]
 
 
-_GAME_ELEMENTS = (
-    "valorant", "league_of_legends", "bacon", "lion", "keystone", "riot_client",
-)
-
-
 def _rewrite_presence(xml_text: str, target: str = "offline") -> str:
     if "<presence" not in xml_text:
         return xml_text
@@ -154,16 +149,21 @@ def _rewrite_presence(xml_text: str, target: str = "offline") -> str:
         return xml_text
 
     s = xml_text
+    s = re.sub(r"<games\b[^>]*>.*?</games>", "<games></games>", s, flags=re.DOTALL)
     if "<show>" in s:
         s = re.sub(r"<show>.*?</show>", f"<show>{target}</show>", s,
                    count=1, flags=re.DOTALL)
-    else:
+    elif re.search(r"<show\s*/>", s):
         s = re.sub(r"<show\s*/>", f"<show>{target}</show>", s, count=1)
+    elif not re.search(r"\btype=", open_tag):
+        show = f"<show>{target}</show>"
+        if open_tag.endswith("/>"):
+            s = f"{open_tag[:-2].rstrip()}>{show}</presence>" + s[len(open_tag):]
+        else:
+            k = s.rfind("</presence>")
+            s = s[:k] + show + s[k:]
     s = re.sub(r"<status>.*?</status>", "", s, flags=re.DOTALL)
     s = re.sub(r"<status\s*/>", "", s)
-    for tag in _GAME_ELEMENTS:
-        s = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", s, flags=re.DOTALL)
-        s = re.sub(rf"<{tag}\b[^>]*/>", "", s)
     if s != xml_text:
         _dbg(f"presence: offline-rewrote ({len(xml_text)}->{len(s)}b)")
     return s
@@ -368,16 +368,34 @@ def find_riot_client() -> str | None:
     return None
 
 
-def kill_riot() -> None:
-    for name in _RIOT_PROCS:
+def kill_riot() -> bool:
+    def _kill_all():
+        for name in _RIOT_PROCS:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", name],
+                    capture_output=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
+    _kill_all()
+    targets = {name.lower() for name in _RIOT_PROCS}
+    deadline = time.monotonic() + 10
+    next_kill = time.monotonic() + 1
+    while True:
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", name],
-                capture_output=True, timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            if not targets & _windows_process_names():
+                return True
         except Exception:
-            pass
+            time.sleep(3.0)
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        if time.monotonic() >= next_kill:
+            _kill_all()
+            next_kill = time.monotonic() + 1
+        time.sleep(0.25)
 
 
 def _hidden_riot_process_kwargs() -> dict:
@@ -467,13 +485,62 @@ def ensure_cert() -> str:
 class _Target:
     host: str | None = None
     port: int = 5223
-    affinity_resolved: bool = False
+    affinity_auth: str | None = None
+
+
+_TAG_END = re.compile(rb"""(?:[^>'"]|'[^']*'|"[^"]*")*>""")
+
+
+class _Side:
+
+    def __init__(self, writer):
+        self.writer = writer
+        self.depth = 0
+        self.partial = b""
+        self.held = []
+
+    def at_boundary(self) -> bool:
+        return self.depth == 1 and not self.partial
+
+    def _scan(self, data: bytes) -> None:
+        buf, i = self.partial + data, 0
+        self.partial = b""
+        while True:
+            lt = buf.find(b"<", i)
+            if lt == -1:
+                return
+            m = _TAG_END.match(buf, lt + 1)
+            if not m:
+                self.partial = buf[lt:]
+                return
+            tag = buf[lt + 1:m.end() - 1]
+            if tag.startswith(b"/"):
+                self.depth -= 1
+            elif tag.startswith(b"stream:stream"):
+                self.depth = 1
+            elif not tag.startswith((b"?", b"!")) and not tag.endswith(b"/"):
+                self.depth += 1
+            i = m.end()
+
+    def forward(self, data: bytes) -> None:
+        self.writer.write(data)
+        self._scan(data)
+        if self.held and self.at_boundary():
+            self.writer.write(b"".join(self.held))
+            self.held.clear()
+
+    def inject(self, data: bytes) -> None:
+        if self.at_boundary():
+            self.writer.write(data)
+        else:
+            self.held.append(data)
 
 
 class _Conn:
     def __init__(self, client_writer, up_writer):
-        self.client_writer = client_writer
-        self.up_writer = up_writer
+        self.client = _Side(client_writer)
+        self.up = _Side(up_writer)
+        self.greet_task = None
         self.version: str | None = None
         self.inserted = False
         self.presence_sent = False
@@ -560,24 +627,26 @@ class _Engine:
         self.connected = True
         conn = _Conn(c_writer, u_writer)
         self._conns.append(conn)
+        pumps = [asyncio.ensure_future(self._pump_c2s(c_reader, conn)),
+                 asyncio.ensure_future(self._pump_s2c(u_reader, conn))]
         try:
-            results = await asyncio.gather(
-                self._pump_c2s(c_reader, u_writer, conn),
-                self._pump_s2c(u_reader, c_writer, conn),
-                return_exceptions=True,
-            )
+            done, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            errs = [repr(t.exception()) for t in done
+                    if not t.cancelled() and t.exception()]
+            _dbg("chat: connection closed" + (f" errors={errs}" if errs else ""))
         finally:
+            for t in pumps + [conn.greet_task]:
+                if t is not None:
+                    t.cancel()
             if conn in self._conns:
                 self._conns.remove(conn)
-        errs = [repr(r) for r in results if isinstance(r, Exception)]
-        _dbg("chat: connection closed" + (f" errors={errs}" if errs else ""))
-        for w in (c_writer, u_writer):
-            try:
-                w.close()
-            except Exception:
-                pass
+            for w in (c_writer, u_writer):
+                try:
+                    w.close()
+                except Exception:
+                    pass
 
-    async def _pump_c2s(self, reader, writer, conn):
+    async def _pump_c2s(self, reader, conn):
         dec = codecs.getincrementaldecoder("utf-8")()
         buf = ""
         while True:
@@ -603,15 +672,15 @@ class _Engine:
             out, buf = process_c2s(buf, target=self.status if hide else "offline",
                                    on_presence=conn.capture, rewrite=hide)
             if out:
-                writer.write(out.encode("utf-8"))
-                await writer.drain()
+                conn.up.forward(out.encode("utf-8"))
+                await conn.up.writer.drain()
             if conn.inserted and not conn.presence_sent:
                 await self._send_fake_presence(conn)
         if buf:
-            writer.write(buf.encode("utf-8"))
-            await writer.drain()
+            conn.up.forward(buf.encode("utf-8"))
+            await conn.up.writer.drain()
 
-    async def _pump_s2c(self, reader, writer, conn):
+    async def _pump_s2c(self, reader, conn):
         while True:
             data = await reader.read(65536)
             if not data:
@@ -621,30 +690,30 @@ class _Engine:
                 if hacked is not None:
                     conn.inserted = True
                     self.friends_loaded = True
-                    writer.write(hacked)
-                    await writer.drain()
+                    conn.client.forward(hacked)
+                    await conn.client.writer.drain()
                     _dbg("s2c: injected fake 'Valorant Scout Active' friend", echo=True)
-                    asyncio.create_task(self._greet_later(conn))
+                    conn.greet_task = asyncio.create_task(self._greet_later(conn))
                     continue
-            writer.write(data)
-            await writer.drain()
+            conn.client.forward(data)
+            await conn.client.writer.drain()
 
     async def _send_fake_presence(self, conn):
         conn.presence_sent = True
         try:
-            conn.client_writer.write(_fake_presence(conn.version, self.status))
-            await conn.client_writer.drain()
+            conn.client.inject(_fake_presence(conn.version, self.status))
+            await conn.client.writer.drain()
         except Exception:
             pass
 
     async def _greet_later(self, conn):
         try:
             await asyncio.sleep(6)
-            conn.client_writer.write(_fake_message(
+            conn.client.inject(_fake_message(
                 f"Valorant Scout is active — friends see you as {self.status.upper()}. "
                 "Message me 'online', 'offline', 'away' or 'mobile' to switch "
                 "anytime (or use the Scout app / website)."))
-            await conn.client_writer.drain()
+            await conn.client.writer.drain()
         except Exception:
             pass
 
@@ -676,12 +745,13 @@ class _Engine:
             raw = conn.last_presence
             if raw:
                 payload = raw if self.status == "online" else _rewrite_presence(raw, self.status)
-                conn.up_writer.write(payload.encode("utf-8"))
-                await conn.up_writer.drain()
-            if conn.presence_sent:
-                conn.client_writer.write(_fake_presence(conn.version, self.status))
-            conn.client_writer.write(_fake_message(_status_line(self.status)))
-            await conn.client_writer.drain()
+                conn.up.inject(payload.encode("utf-8"))
+                await conn.up.writer.drain()
+            if conn.inserted:
+                if conn.presence_sent:
+                    conn.client.inject(_fake_presence(conn.version, self.status))
+                conn.client.inject(_fake_message(_status_line(self.status)))
+                await conn.client.writer.drain()
         except Exception:
             pass
 
@@ -690,19 +760,18 @@ class _Engine:
         if not m:
             return
         body = m.group(1).strip().lower()
-        for kw in ("offline", "away", "mobile", "online"):
-            if kw in body:
-                self.set_status(kw)
-                return
-        if "status" in body:
+        if body in _VALID_STATUS:
+            self.set_status(body)
+            return
+        if body == "status":
             reply = f"You're currently appearing {self.status.upper()}."
-        elif "help" in body:
+        elif body == "help":
             reply = "Commands: online / offline / away / mobile / status / help"
         else:
             reply = "Didn't catch that. Try: online / offline / away / mobile / status / help"
         try:
-            conn.client_writer.write(_fake_message(reply))
-            await conn.client_writer.drain()
+            conn.client.inject(_fake_message(reply))
+            await conn.client.writer.drain()
         except Exception:
             pass
 
@@ -752,23 +821,24 @@ class _Engine:
     def _rewrite_config(self, cfg: dict, auth: str | None = None) -> dict:
         if not isinstance(cfg, dict):
             return cfg
+        target = self.target
         host = cfg.get("chat.host")
         if isinstance(host, str):
-            if not self.target.affinity_resolved:
-                self.target.host = host
+            if not target.affinity_auth:
+                target.host = host
             cfg["chat.host"] = CHAT_DOMAIN
             _dbg(f"config: rewrote chat.host {host} -> {CHAT_DOMAIN}")
         if isinstance(cfg.get("chat.port"), int):
-            self.target.port = cfg["chat.port"]
+            target.port = cfg["chat.port"]
             cfg["chat.port"] = self.chat_port
         aff = cfg.get("chat.affinities")
         if isinstance(aff, dict):
             if cfg.get("chat.affinity.enabled") and auth \
-                    and not self.target.affinity_resolved:
+                    and auth != target.affinity_auth:
                 resolved = self._resolve_affinity_host(aff, auth)
                 if resolved:
-                    self.target.host = resolved
-                    self.target.affinity_resolved = True
+                    target.host = resolved
+                    target.affinity_auth = auth
             cfg["chat.affinities"] = {k: CHAT_DOMAIN for k in aff}
         return cfg
 
@@ -970,23 +1040,32 @@ def _riot_process_running() -> bool:
         return True
 
 
+_last_launch = 0.0
+
+
 def _helper_monitor(server) -> None:
-    launched_at = time.monotonic()
+    started = time.monotonic()
     saw_riot = False
     gone_since = None
     while True:
         time.sleep(10)
+        now = time.monotonic()
+        since_launch = now - max(started, _last_launch)
         running = _riot_process_running()
-        if running:
-            saw_riot = True
+        if running or since_launch < 120:
+            saw_riot = saw_riot or running
             gone_since = None
             continue
-        if not saw_riot or time.monotonic() - launched_at < 90:
+        if not saw_riot:
+            if since_launch >= 300:
+                _dbg("helper: Riot never started; shutting down detached relay")
+                server.shutdown()
+                return
             continue
         if gone_since is None:
-            gone_since = time.monotonic()
+            gone_since = now
             continue
-        if time.monotonic() - gone_since >= 45:
+        if now - gone_since >= 45:
             _dbg("helper: Riot/VALORANT closed; shutting down detached relay")
             server.shutdown()
             return
@@ -1098,9 +1177,14 @@ def _launch_local(status_: str | None = None) -> dict:
     if s in _VALID_STATUS and s != "online" and _engine.status != s:
         _engine.set_status(s)
 
+    global _last_launch
+    _last_launch = time.monotonic()
     _dbg(f"launch: killing Riot, then starting {rc}", echo=True)
-    kill_riot()
-    time.sleep(3.0)
+    if not kill_riot():
+        return {"ok": False,
+                "message": "Couldn't close the running Riot Client / VALORANT. "
+                           "Close them manually, then try again."}
+    _engine.target = _Target()
 
     args = [
         rc,

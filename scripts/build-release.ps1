@@ -22,6 +22,9 @@ $AllowExact = @(
 $AllowPrefix = @("assets/", "backend/", "docs/", "scripts/")
 
 
+$ExcludeExact = @("backend/offline_chat.pem")
+
+
 $ForbiddenPatterns = @(
     '(^|/)\.env$', '\.env\.local', '(^|/)frontend/', '(^|/)node_modules/',
     '(^|/)__pycache__/', '\.pyc$', '(^|/)\.venv/', '(^|/)\.scout/',
@@ -31,7 +34,7 @@ $ForbiddenPatterns = @(
 
 
 $SecretScans = @(
-    @{ Name = "private key";            Pattern = 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY' },
+    @{ Name = "private key";            Pattern = 'BEGIN ([A-Z]+ )?PRIVATE KEY' },
     @{ Name = "Ably root key";          Pattern = '\b[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}:[A-Za-z0-9_\-]{16,}\b' },
     @{ Name = "Supabase service key";   Pattern = 'eyJ[A-Za-z0-9_\-]{30,}\.[A-Za-z0-9_\-]{30,}' },
     @{ Name = "developer absolute path"; Pattern = '[A-Za-z]:\\Users\\(?!Public)[A-Za-z0-9._ -]+\\' },
@@ -63,7 +66,7 @@ foreach ($f in $tracked) {
     $take = $false
     if ($AllowExact -contains $f) { $take = $true }
     foreach ($p in $AllowPrefix) { if ($f.StartsWith($p)) { $take = $true } }
-    if (-not $take) { continue }
+    if (-not $take -or $ExcludeExact -contains $f) { continue }
     foreach ($fp in $ForbiddenPatterns) {
         if ($f -match $fp) { Fail-Build "allowlisted file matches a forbidden pattern: $f ($fp)" }
     }
@@ -113,7 +116,7 @@ try {
     Ok "Python, PowerShell and batch comments stripped; staged Python byte-compiles."
 
     Step "Scanning the staged tree for secrets, caches and developer paths ..."
-    $textExt = @(".py", ".ps1", ".bat", ".md", ".txt", ".json", ".example", ".gitignore", ".gitattributes")
+    $textExt = @(".py", ".ps1", ".bat", ".md", ".txt", ".json", ".example", ".gitignore", ".gitattributes", ".pem", ".key")
     foreach ($file in (Get-ChildItem -Path $stage -Recurse -File)) {
         $rel = $file.FullName.Substring($stage.Length + 1) -replace '\\', '/'
         foreach ($fp in $ForbiddenPatterns) {

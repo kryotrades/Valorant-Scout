@@ -28,8 +28,8 @@ REGION_MAP = {
     "eu":    ("eu",    "eu-1", "eu"),
     "ap":    ("ap",    "ap-1", "ap"),
     "kr":    ("kr",    "kr-1", "kr"),
-    "latam": ("latam", "na-1", "latam"),
-    "br":    ("br",    "na-1", "br"),
+    "latam": ("na",    "latam-1", "na"),
+    "br":    ("na",    "br-1",    "na"),
 }
 REGIONS = ["na", "eu", "ap", "kr", "latam", "br"]
 
@@ -59,6 +59,8 @@ _MMR_BUCKET = {"tokens": _MMR_BURST, "at": 0.0}
 
 _HOLD_UNTIL = {"mmr": 0.0, "other": 0.0}
 
+_GLZ_BUCKET = {"tokens": _RIOT_BURST, "at": 0.0}
+
 def _family(endpoint: str) -> str:
     return "mmr" if endpoint.startswith("/mmr/") else "other"
 
@@ -85,8 +87,11 @@ def _take_token(bucket: dict, burst: float, rps: float) -> None:
             wait = (1.0 - bucket["tokens"]) / rps
         time.sleep(wait)
 
-def _riot_throttle(endpoint: str = "") -> None:
+def _riot_throttle(endpoint: str = "", glz: bool = False) -> None:
     if _RIOT_MAX_RPS <= 0:
+        return
+    if glz:
+        _take_token(_GLZ_BUCKET, _RIOT_BURST, _RIOT_MAX_RPS)
         return
     while True:
         wait = held_secs(endpoint)
@@ -225,7 +230,7 @@ class LocalAuth:
         return self._headers
 
     def glz_post(self, endpoint: str, json: dict | None = None) -> requests.Response:
-        _riot_throttle()
+        _riot_throttle(glz=True)
         self.req_count += 1
         return requests.post(self.glz_url + endpoint, headers=self.headers(),
                              json=json, verify=False, timeout=8)
@@ -241,7 +246,7 @@ class LocalAuth:
             return {}
 
     def glz_get(self, endpoint: str) -> dict:
-        _riot_throttle()
+        _riot_throttle(glz=True)
         self.req_count += 1
         return self._json(requests.get(self.glz_url + endpoint, headers=self.headers(),
                                        verify=False, timeout=8))

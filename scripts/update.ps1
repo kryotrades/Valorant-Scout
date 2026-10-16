@@ -12,7 +12,7 @@
 
 
 
-$StateFile = Join-Path $ScoutDir "update-state.json"
+$StateFile = $UpdateStateFile
 
 function Write-UpdateState($state) {
     $temp = "$StateFile.tmp"
@@ -24,30 +24,6 @@ function Write-UpdateState($state) {
     } else {
         [System.IO.File]::Move($temp, $StateFile)
     }
-}
-
-
-$PreservePrefixes = @("backend\.env", "backend\data", ".scout", ".venv", ".git",
-                      "frontend\.env.local", "frontend\node_modules", "frontend\.next")
-
-function Test-Preserved([string]$rel) {
-    $rel = $rel -replace '/', '\'
-    foreach ($p in $PreservePrefixes) {
-        if ($rel.Equals($p, [StringComparison]::OrdinalIgnoreCase) -or
-                $rel.StartsWith("$p\", [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    }
-    return $false
-}
-
-function Resolve-RepoPath([string]$rel) {
-    $rel = $rel -replace '/', '\'
-    if ([System.IO.Path]::IsPathRooted($rel)) { throw "absolute update path is forbidden: '$rel'" }
-    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
-    $full = [System.IO.Path]::GetFullPath((Join-Path $rootFull $rel))
-    if (-not $full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "update path escapes the installation folder: '$rel'"
-    }
-    return $full
 }
 
 function Get-FreePort {
@@ -80,38 +56,6 @@ function Remove-LegacyCaches {
     }
 }
 
-function Restore-FromBackup($state) {
-    Step "Rolling back the interrupted/failed update ..."
-    $backup = $state.backupDir
-    if (-not $backup -or -not (Test-Path $backup)) {
-        throw "update rollback backup is missing; refusing to guess at the previous tree. Reinstall the last release over this folder."
-    }
-    Get-ChildItem -Path $backup -Recurse -File | ForEach-Object {
-        $rel = $_.FullName.Substring($backup.Length).TrimStart('\')
-        $dst = Resolve-RepoPath $rel
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
-        Copy-Item -Force $_.FullName $dst
-    }
-    foreach ($rel in @($state.addedFiles)) {
-        if (-not $rel) { continue }
-        if (Test-Preserved $rel) { continue }
-        $p = Resolve-RepoPath $rel
-        if (Test-Path $p) { Remove-Item -Force $p }
-    }
-    if ($state.venvTouched -and $state.venvBackupDir -and (Test-Path $state.venvBackupDir)) {
-        $resolved = Assert-IsRepoVenv $VenvDir
-        if (Test-Path $resolved) { Remove-Item -Recurse -Force $resolved }
-        Move-Item -LiteralPath $state.venvBackupDir -Destination $resolved
-    }
-
-
-    Save-Markers (Get-SavedRegion)
-    if ($backup -and (Test-Path $backup)) { Remove-Item -Recurse -Force $backup -ErrorAction SilentlyContinue }
-    Remove-Item -Force $StateFile -ErrorAction SilentlyContinue
-    Write-ScoutLog -Log update -Level WARN -Code VS-UPDATE-001 -Message "rolled back to v$(Get-LocalVersion)"
-    Ok "Rolled back — you are on v$(Get-LocalVersion)."
-}
-
 Write-Host ""
 Write-Host "  VALORANT SCOUT - UPDATE" -ForegroundColor Red
 
@@ -127,15 +71,7 @@ try {
 
 
 
-    if (Test-Path $StateFile) {
-        try { $prev = Get-Content $StateFile -Raw | ConvertFrom-Json } catch { $prev = $null }
-        if ($prev -and $prev.phase -in @("apply", "validate")) {
-            Warn2 "A previous update was interrupted mid-apply."
-            Restore-FromBackup $prev
-        } else {
-            throw "update-state.json is unreadable or has an unknown phase; refusing to continue without a safe rollback plan. Re-extract the last release over this folder."
-        }
-    }
+    Resume-InterruptedUpdate | Out-Null
 
     if (-not (Is-Installed)) {
         Warn2 "Not set up yet - run install.bat first."
@@ -297,7 +233,10 @@ try {
 
     Step "Applying update v$newVersion (your settings and data are preserved) ..."
     try {
-        foreach ($rel in $newFiles) {
+
+
+        $applyOrder = @($newFiles | Where-Object { $_ -ne "VERSION" }) + @($newFiles | Where-Object { $_ -eq "VERSION" })
+        foreach ($rel in $applyOrder) {
             $src = Join-Path $newRoot ($rel -replace '\\', '/')
             $dst = Resolve-RepoPath $rel
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
@@ -421,7 +360,7 @@ try {
     Fail "Update failed: $($_.Exception.Message)"
     Write-ScoutLog -Log update -Level ERROR -Code VS-UPDATE-001 -Message $_.Exception.Message
     if (Test-Path $StateFile) {
-        Write-Host "  Automatic rollback could not finish. Do not launch; re-extract the last release over this folder, then run install.bat." -ForegroundColor Yellow
+        Write-Host "  Automatic rollback could not finish. Do not launch; re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat." -ForegroundColor Yellow
     } else {
         Write-Host "  Nothing was changed. See $(Join-Path $ScoutDir 'update.log')." -ForegroundColor Yellow
     }

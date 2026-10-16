@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import threading
 
 from agents import resolve_agent
 from riot_client import LocalAuth
 from vconstants import map_name_from_path
+
+MIN_DELAY_S = 4.0
+JITTER_S = 1.5
 
 def _self_session_state(presences: list, puuid: str) -> str | None:
     pass
@@ -63,15 +67,18 @@ class InstalockWorker:
             if not resolve_agent(name):
                 return {"ok": False,
                         "message": f"Unknown agent '{name}' for map '{mapn}'."}
+        delay = max(MIN_DELAY_S, float(delay or 0)) + random.uniform(0, JITTER_S)
         self.stop()
         with self._lock:
-            self._stop.clear()
+            stop = threading.Event()
+            self._stop.set()
+            self._stop = stop
             self.state.update(running=True, status="waiting", agent=agent["name"],
                               mode=mode, side=None, map=None,
                               message="Armed — waiting for agent select…")
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(agent, mode, float(delay or 0), region, per_map_norm),
+                args=(stop, agent, mode, delay, region, per_map_norm),
                 daemon=True)
             self._thread.start()
         return {"ok": True, "running": True, "agent": agent["name"],
@@ -87,17 +94,25 @@ class InstalockWorker:
         self.state.update(running=False)
         return {"ok": True, "running": False}
 
-    def _loop(self, agent: dict, mode: str, delay: float, region, per_map: dict):
+    def _update(self, stop: threading.Event, **kw) -> bool:
+        with self._lock:
+            if stop is not self._stop:
+                return False
+            self.state.update(**kw)
+            return True
+
+    def _loop(self, stop: threading.Event, agent: dict, mode: str, delay: float,
+              region, per_map: dict):
         done: set[str] = set()
         try:
             auth = LocalAuth(region)
             auth.headers()
         except Exception as e:
-            self.state.update(running=False, status="error",
-                              message=f"Couldn't reach the local client: {e}")
+            self._update(stop, running=False, status="error",
+                         message=f"Couldn't reach the local client: {e}")
             return
 
-        while not self._stop.is_set():
+        while not stop.is_set():
             try:
                 presences = (auth.local_get("/chat/v4/presences") or {}).get("presences", [])
                 st = _self_session_state(presences, auth.puuid)
@@ -105,7 +120,7 @@ class InstalockWorker:
                     pg = auth.glz_get(f"/pregame/v1/players/{auth.puuid}")
                     mid = pg.get("MatchID") if isinstance(pg, dict) else None
                     if mid and mid not in done:
-                        if delay > 0 and self._stop.wait(delay):
+                        if delay > 0 and stop.wait(delay):
                             break
                         match = auth.glz_get(f"/pregame/v1/matches/{mid}")
                         side = _side_from_match(match, auth.puuid)
@@ -118,12 +133,14 @@ class InstalockWorker:
                             if resolved:
                                 chosen = resolved
                         agent_id = chosen["uuid"]
+                        if stop.is_set():
+                            break
                         auth.glz_post(f"/pregame/v1/matches/{mid}/select/{agent_id}")
                         if mode == "lock":
                             auth.glz_post(f"/pregame/v1/matches/{mid}/lock/{agent_id}")
                         done.add(mid)
-                        self.state.update(
-                            running=False, status="locked", side=side,
+                        self._update(
+                            stop, running=False, status="locked", side=side,
                             agent=chosen["name"], map=map_name,
                             message=f"{'Locked' if mode == 'lock' else 'Hovered'} "
                                     f"{chosen['name']}"
@@ -133,19 +150,19 @@ class InstalockWorker:
                         return
 
                 elif st is None:
-                    self.state.update(running=False, status="error",
-                                      message="Local client not reachable — is VALORANT open?")
+                    self._update(stop, running=False, status="error",
+                                 message="Local client not reachable — is VALORANT open?")
                     return
-                if self._stop.wait(1.0):
+                if stop.wait(1.0):
                     break
             except Exception:
                 try:
                     auth.headers(refresh=True)
                 except Exception:
                     pass
-                if self._stop.wait(1.5):
+                if stop.wait(1.5):
                     break
 
-        self.state.update(running=False)
-        if self.state.get("status") not in ("locked", "error"):
-            self.state.update(status="stopped", message="Stopped.")
+        if (self._update(stop, running=False)
+                and self.state.get("status") not in ("locked", "error")):
+            self._update(stop, status="stopped", message="Stopped.")

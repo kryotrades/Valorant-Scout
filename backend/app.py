@@ -4,9 +4,9 @@ import json
 import os
 import threading
 import time
+from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 
 try:
     from dotenv import load_dotenv
@@ -32,8 +32,25 @@ from riot_client import REGIONS, LocalAuth, RiotClient, ClientNotReady
 from vconstants import APP_VERSION, STATES, rank_from_tier
 
 app = Flask(__name__)
-CORS(app)
 _COMMAND_ROUTER = None
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost"}
+
+def _hostname(value: str | None) -> str | None:
+    try:
+        return urlparse(value or "").hostname
+    except ValueError:
+        return None
+
+@app.before_request
+def _local_callers_only():
+    import ws_server
+    origin = request.headers.get("Origin")
+    bad_host = _hostname("//" + (request.host or "")) not in _LOCAL_HOSTS
+    bad_origin = origin is not None and origin not in ws_server.ALLOWED_ORIGINS and not (
+        origin.startswith("http://") and _hostname(origin) in _LOCAL_HOSTS)
+    if bad_host or bad_origin:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
 
 for _h in scoutlog.get_logger("backend").handlers:
     app.logger.addHandler(_h)
@@ -199,13 +216,9 @@ def _attach_encounters(board: dict) -> dict:
     for p in board.get("players") or []:
         if not isinstance(p, dict):
             continue
-        enc = encounter_log.encounter_for(board.get("selfPuuid"), p.get("puuid")) if is_live else None
-
-        if enc:
-            if self_team is not None and p.get("team") == self_team:
-                enc["withCount"] = max(0, enc["withCount"] - 1)
-            else:
-                enc["againstCount"] = max(0, enc["againstCount"] - 1)
+        enc = encounter_log.encounter_for(
+            board.get("selfPuuid"), p.get("puuid"), board.get("matchId"),
+            same_team=self_team is not None and p.get("team") == self_team) if is_live else None
         p["encounter"] = enc
     return board
 
@@ -556,7 +569,7 @@ def _inventory_payload(demo: bool = False) -> dict:
                 "error": "Your collection is still loading from Riot."}
     except Exception:
         app.logger.exception("inventory snapshot failed")
-        cached = inventory.last_good(owner)
+        cached = inventory.last_good(getattr(auth, "puuid", None))
         if cached:
             return cached
         return {"available": False,

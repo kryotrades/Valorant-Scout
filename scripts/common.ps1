@@ -743,6 +743,85 @@ function Build-Frontend {
 
 
 
+
+
+
+$UpdateStateFile = Join-Path $ScoutDir "update-state.json"
+
+
+$PreservePrefixes = @("backend\.env", "backend\data", ".scout", ".venv", ".git",
+                      "frontend\.env.local", "frontend\node_modules", "frontend\.next")
+
+function Test-Preserved([string]$rel) {
+    $rel = $rel -replace '/', '\'
+    foreach ($p in $PreservePrefixes) {
+        if ($rel.Equals($p, [StringComparison]::OrdinalIgnoreCase) -or
+                $rel.StartsWith("$p\", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Resolve-RepoPath([string]$rel) {
+    $rel = $rel -replace '/', '\'
+    if ([System.IO.Path]::IsPathRooted($rel)) { throw "absolute update path is forbidden: '$rel'" }
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $full = [System.IO.Path]::GetFullPath((Join-Path $rootFull $rel))
+    if (-not $full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "update path escapes the installation folder: '$rel'"
+    }
+    return $full
+}
+
+function Restore-FromBackup($state) {
+    Step "Rolling back the interrupted/failed update ..."
+    $backup = $state.backupDir
+    if (-not $backup -or -not (Test-Path $backup)) {
+        throw "update rollback backup is missing; refusing to guess at the previous tree. Re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat."
+    }
+    Get-ChildItem -Path $backup -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($backup.Length).TrimStart('\')
+        $dst = Resolve-RepoPath $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Copy-Item -Force $_.FullName $dst
+    }
+    foreach ($rel in @($state.addedFiles)) {
+        if (-not $rel) { continue }
+        if (Test-Preserved $rel) { continue }
+        $p = Resolve-RepoPath $rel
+        if (Test-Path $p) { Remove-Item -Force $p }
+    }
+    if ($state.venvTouched -and $state.venvBackupDir -and (Test-Path $state.venvBackupDir)) {
+        $resolved = Assert-IsRepoVenv $VenvDir
+        if (Test-Path $resolved) { Remove-Item -Recurse -Force $resolved }
+        Move-Item -LiteralPath $state.venvBackupDir -Destination $resolved
+    }
+
+
+    Save-Markers (Get-SavedRegion)
+
+
+    Remove-Item -Force $UpdateStateFile -ErrorAction SilentlyContinue
+    if ($backup -and (Test-Path $backup)) { Remove-Item -Recurse -Force $backup -ErrorAction SilentlyContinue }
+    Write-ScoutLog -Log update -Level WARN -Code VS-UPDATE-001 -Message "rolled back to v$(Get-LocalVersion)"
+    Ok "Rolled back — you are on v$(Get-LocalVersion)."
+}
+
+
+
+function Resume-InterruptedUpdate {
+    if (-not (Test-Path $UpdateStateFile)) { return $false }
+    try { $prev = Get-Content $UpdateStateFile -Raw | ConvertFrom-Json } catch { $prev = $null }
+    if ($prev -and $prev.phase -in @("apply", "validate")) {
+        Warn2 "A previous update was interrupted mid-apply."
+        Restore-FromBackup $prev
+        return $true
+    }
+    throw "update-state.json is unreadable or has an unknown phase; refusing to continue without a safe rollback plan. Re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat."
+}
+
+
+
+
 function Get-LatestRelease([int]$timeoutSec = 8) {
     try {
         return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `

@@ -114,7 +114,9 @@ def record_board(board: dict | None) -> None:
             legacy_match_id = entry.get("lastMatchId")
             if legacy_match_id and legacy_match_id not in match_ids:
                 match_ids.append(legacy_match_id)
+                changed = True
             new_match = match_id not in match_ids
+            changed = changed or new_match
             if new_match:
                 same_team = self_team is not None and player.get("team") == self_team
                 key = "withCount" if same_team else "againstCount"
@@ -124,23 +126,25 @@ def record_board(board: dict | None) -> None:
                 entry["lastMatchId"] = match_id
             for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
                         "rankIcon", "rankColor", "kd", "winRate", "level"):
-                if player.get(key) is not None:
+                if player.get(key) is not None and entry.get(key) != player.get(key):
                     entry[key] = player.get(key)
+                    changed = True
             entry["lastSeen"] = now
             agent = player.get("agent")
             if agent and agent != "Unknown" and agent not in entry.setdefault("agents", []):
                 entry["agents"].append(agent)
                 entry["agents"] = entry["agents"][-8:]
+                changed = True
             if agent and agent != "Unknown":
                 if new_match:
                     counts = entry.setdefault("agentCounts", {})
                     counts[agent] = int(counts.get(agent) or 0) + 1
                     entry.setdefault("agentMatchIds", []).append(match_id)
-                if player.get("agentPortrait"):
-                    entry.setdefault("agentPortraits", {})[agent] = player["agentPortrait"]
-                if player.get("agentColor"):
-                    entry.setdefault("agentColors", {})[agent] = player["agentColor"]
-            changed = True
+                for field, key in (("agentPortrait", "agentPortraits"), ("agentColor", "agentColors")):
+                    value = player.get(field)
+                    if value and entry.setdefault(key, {}).get(agent) != value:
+                        entry[key][agent] = value
+                        changed = True
         if changed:
             _save()
 
@@ -358,11 +362,12 @@ def get_one(owner: str | None, puuid: str) -> dict | None:
         return dict(entry) if entry else None
 
 
-def encounter_for(owner: str | None, puuid: str) -> dict | None:
+def encounter_for(owner: str | None, puuid: str, match_id: str | None = None,
+                  same_team: bool = False) -> dict | None:
     entry = get_one(owner, puuid)
     if not entry:
         return None
-    return {
+    out = {
         "withCount": int(entry.get("withCount") or 0),
         "againstCount": int(entry.get("againstCount") or 0),
         "winsWith": int(entry.get("winsWith") or 0),
@@ -370,3 +375,7 @@ def encounter_for(owner: str | None, puuid: str) -> dict | None:
         "winsAgainst": int(entry.get("winsAgainst") or 0),
         "lossesAgainst": int(entry.get("lossesAgainst") or 0),
     }
+    if match_id and match_id in (entry.get("matchIds") or []):
+        key = "withCount" if same_team else "againstCount"
+        out[key] = max(0, out[key] - 1)
+    return out

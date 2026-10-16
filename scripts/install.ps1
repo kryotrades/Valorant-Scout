@@ -19,6 +19,10 @@ try {
     $appMutex = New-ScoutMutex "App" "Valorant Scout is still running and couldn't be closed automatically. Close the scoreboard window, then run install.bat again."
     Write-ScoutLog -Log install -Message "install/repair started (v$(Get-LocalVersion), tree=$(if ($HasFrontend) { 'full' } else { 'slim' }))"
 
+
+
+    Resume-InterruptedUpdate | Out-Null
+
     Step "Checking this PC ..."
     $problems = Test-Preflight
     if ($problems.Count -gt 0) {

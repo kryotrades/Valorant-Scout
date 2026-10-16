@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import requests
 
 BASE = "https://valorant-api.com/v1"
@@ -14,15 +16,22 @@ WEAPON_UUIDS = {
 }
 
 _cache: dict = {}
+_failed_at: dict = {}
+_RETRY_SECS = 60.0
 
 def _get(path: str):
     if path in _cache:
         return _cache[path]
+    if time.time() - _failed_at.get(path, 0.0) < _RETRY_SECS:
+        return None
     try:
         data = requests.get(f"{BASE}/{path}", timeout=10).json().get("data")
     except Exception:
         data = None
-    _cache[path] = data
+    if data:
+        _cache[path] = data
+    else:
+        _failed_at[path] = time.time()
     return data
 
 def _skins_map() -> dict:
@@ -34,7 +43,8 @@ def _skins_map() -> dict:
             "name": skin.get("displayName", "").strip(),
             "icon": skin.get("displayIcon"),
         }
-    _cache["_skins"] = out
+    if out:
+        _cache["_skins"] = out
     return out
 
 def skin_from_id(skin_id: str, weapon: str = "Vandal"):
@@ -62,7 +72,8 @@ def _weapons_map() -> dict:
         if w.get("uuid") and w.get("displayName"):
             out[w["uuid"].lower()] = {"name": w["displayName"],
                                       "icon": w.get("displayIcon")}
-    _cache["_weapons"] = out
+    if out:
+        _cache["_weapons"] = out
     return out
 
 def weapon_name(uuid: str):
@@ -89,7 +100,8 @@ def skins_for_weapon(weapon: str) -> list:
         n = v.get("name") or ""
         if v.get("icon") and n.lower().endswith(suffix) and not n.lower().startswith("standard"):
             out.append({"name": n[: -len(weapon) - 1].strip() or n, "icon": v["icon"]})
-    _cache[key] = out
+    if "_skins" in _cache:
+        _cache[key] = out
     return out
 
 def loadout_weapons(items: dict) -> list:
@@ -121,7 +133,8 @@ def _tiers_map() -> dict:
     if sets:
         for t in sets[-1].get("tiers", []):
             out[t["tier"]] = {"icon": t.get("smallIcon"), "large": t.get("largeIcon")}
-    _cache["_tiers"] = out
+    if out:
+        _cache["_tiers"] = out
     return out
 
 def rank_icon(tier: int):
@@ -138,7 +151,8 @@ def _titles_map() -> dict:
         return _cache["_titles"]
     out = {t["uuid"].lower(): (t.get("titleText") or "")
            for t in (_get("playertitles") or [])}
-    _cache["_titles"] = out
+    if out:
+        _cache["_titles"] = out
     return out
 
 def title_text(title_id: str):
@@ -158,7 +172,8 @@ def _maps_map() -> dict:
     for m in _get("maps") or []:
         if m.get("displayName"):
             out[m["displayName"]] = m.get("splash")
-    _cache["_maps"] = out
+    if out:
+        _cache["_maps"] = out
     return out
 
 def map_splash(name: str):
@@ -211,7 +226,8 @@ def _season_labels() -> dict:
         ep = by_id.get((s.get("parentUuid") or "").lower())
         ep_label = _episode_label((ep or {}).get("displayName"))
         out[s["uuid"].lower()] = (f"{ep_label} Act {num}" if ep_label else f"Act {num}")
-    _cache["_seasonlabels"] = out
+    if out:
+        _cache["_seasonlabels"] = out
     return out
 
 def season_label(season_id: str):

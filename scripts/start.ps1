@@ -33,6 +33,26 @@ Write-ScoutLog -Log launcher -Message "startup requested (v$(Get-LocalVersion))"
 
 
 Show-Phase 1 "Checking your installation..."
+
+
+if (Test-Path $UpdateStateFile) {
+    Write-Host ""
+    $maintenanceMutex = $null
+    $appMutex = $null
+    try {
+        $maintenanceMutex = New-ScoutMutex "Maintenance" "an install/update is still running. Wait for it to finish, then start again"
+        Stop-RunningApp "launcher" | Out-Null
+        $appMutex = New-ScoutMutex "App" "Valorant Scout is still running and couldn't be closed automatically"
+        Resume-InterruptedUpdate | Out-Null
+    } catch {
+        Write-ScoutLog -Log launcher -Level ERROR -Code VS-UPDATE-001 -Message "startup blocked: interrupted update: $($_.Exception.Message)"
+        Show-FatalDialog "Valorant Scout can't start: $($_.Exception.Message)" "launcher"
+        exit 1
+    } finally {
+        Close-ScoutMutex $appMutex
+        Close-ScoutMutex $maintenanceMutex
+    }
+}
 $markers = Test-Markers
 if (-not $markers.Ok) {
     Write-Host ""

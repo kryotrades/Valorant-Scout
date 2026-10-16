@@ -18,6 +18,7 @@ _LOCK = threading.RLock()
 _RECAP_TTL = 600.0
 _MAX_POINTS = 40
 _MAX_ARCHIVE = 100
+_RECAP_GIVE_UP_S = 600
 
 _STATE = {
     "prev_state": None, "ingame_board": None, "recap": None,
@@ -361,7 +362,12 @@ def observe(board: dict, lm) -> None:
             finally:
                 if not completed:
                     with _LOCK:
-                        _STATE["recorded"].discard(key)
+                        first = _STATE.setdefault("recap_first_fail", {})
+                        started = first.setdefault(key, time.time())
+                        if time.time() - started < _RECAP_GIVE_UP_S:
+                            _STATE["recorded"].discard(key)
+                        elif _STATE.get("ingame_board") is snap:
+                            _STATE["ingame_board"] = None
 
         threading.Thread(target=finish, daemon=True, name=f"recap-{str(match_id)[:8]}").start()
     except Exception:

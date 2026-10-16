@@ -59,7 +59,8 @@ def _contract_rewards() -> set:
             for r in rewards:
                 if r.get("type") == "EquippableSkinLevel" and r.get("uuid"):
                     out.add(r["uuid"].lower())
-    valapi._cache["_contractskins"] = out
+    if out:
+        valapi._cache["_contractskins"] = out
     return out
 
 def _base_levels() -> dict:
@@ -81,13 +82,20 @@ def _base_levels() -> dict:
                 "vp": _MELEE_VP if melee else vp,
                 "tier": _TIER_NAMES.get(tier_uuid, "Exclusive" if melee else "Other"),
             }
-    valapi._cache["_baselevels"] = out
+    if out:
+        valapi._cache["_baselevels"] = out
     return out
 
+def _pd(auth, endpoint: str) -> dict:
+    data = auth.pd_get(endpoint)
+    if not isinstance(data, dict) or not data or data.get("errorCode") or data.get("httpStatus"):
+        raise RuntimeError("pd request failed")
+    return data
+
 def _owned_ids(auth, item_type: str) -> list[str]:
-    data = auth.pd_get(f"/store/v1/entitlements/{auth.puuid}/{item_type}")
+    data = _pd(auth, f"/store/v1/entitlements/{auth.puuid}/{item_type}")
     return [(e.get("ItemID") or "").lower()
-            for e in (data or {}).get("Entitlements", []) or [] if e.get("ItemID")]
+            for e in data.get("Entitlements", []) or [] if e.get("ItemID")]
 
 def snapshot(auth) -> dict:
     now = time.time()
@@ -101,6 +109,8 @@ def snapshot(auth) -> dict:
     owned = _owned_ids(auth, ITEM_TYPES["skins"])
     base = _base_levels()
     freebies = _contract_rewards()
+    if not base:
+        raise RuntimeError("skin catalog unavailable")
 
     total = 0
     priced = []
@@ -127,7 +137,7 @@ def snapshot(auth) -> dict:
     recent = [base[sid] for sid in recent_ids if sid in base]
     recent.sort(key=lambda item: item["vp"], reverse=True)
 
-    wallet = (auth.pd_get(f"/store/v1/wallet/{auth.puuid}") or {}).get("Balances") or {}
+    wallet = _pd(auth, f"/store/v1/wallet/{auth.puuid}").get("Balances") or {}
 
     counts = {"skins": len(priced), "earned": earned}
     for key in ("buddies", "cards", "sprays", "agents"):
