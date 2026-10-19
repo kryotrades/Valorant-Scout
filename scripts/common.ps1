@@ -161,7 +161,10 @@ function Show-FatalDialog([string]$message, [string]$logName) {
 
 
 function New-ScoutLock([string]$name) {
-    if (-not (Test-Path $ScoutDir)) { New-Item -ItemType Directory -Path $ScoutDir | Out-Null }
+
+
+
+    if (-not (Test-Path -LiteralPath $ScoutDir)) { New-Item -ItemType Directory -Path $ScoutDir | Out-Null }
     $path = Join-Path $ScoutDir "$name.lock"
     try {
         return [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate,
@@ -568,6 +571,16 @@ function Test-Venv([switch]$Quick) {
 function Repair-Venv($py) {
     $resolved = Assert-IsRepoVenv $VenvDir
     if (Test-Path $resolved) {
+
+
+
+
+        $venvPrefix = $resolved.TrimEnd('\').ToLowerInvariant() + '\'
+        $busy = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($venvPrefix) })
+        if ($busy.Count -gt 0) {
+            throw "Couldn't rebuild .venv: $($busy[0].Name) (PID $($busy[0].ProcessId)) is still running from it. Close VALORANT if it is open (Valorant Scout's offline-chat helper runs until VALORANT exits), then run install.bat again."
+        }
         Step "Rebuilding the Python environment (.venv) ..."
         try {
             Remove-Item -Recurse -Force $resolved
@@ -674,7 +687,8 @@ function Set-Region($region) {
     $lines = @()
     if (Test-Path $EnvFile) {
 
-        $lines = Get-Content $EnvFile -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*RIOT_REGION\s*=' }
+
+        $lines = @(Get-Content $EnvFile -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*RIOT_REGION\s*=' })
     }
     $lines += "RIOT_REGION=$region"
     Write-FileNoBom $EnvFile (($lines -join "`r`n") + "`r`n")

@@ -39,7 +39,7 @@ _MATCH_META: dict[str, dict] = {}
 
 _LOBBY_CACHE: dict[bool, dict] = {}
 
-_LAST_BOARD: dict = {"board": None, "at": 0.0}
+_LAST_BOARD: dict = {"board": None, "at": 0.0, "puuid": None}
 _HOLD_SECS = 90.0
 
 _ACCT_CACHE: dict[str, str | None] = {}
@@ -62,7 +62,7 @@ _KD_CACHE_MAX = 300
 _MIDS_CACHE: dict[str, tuple[list[str], bool, float]] = {}
 _MIDS_TTL = 60.0
 
-_RANK_CACHE: dict[str, tuple[dict, str]] = {}
+_RANK_CACHE: dict[str, tuple[dict, str, float]] = {}
 _RR_CACHE: dict[str, tuple] = {}
 
 _MATCH_DETAIL_CACHE: dict[str, dict] = {}
@@ -210,40 +210,103 @@ class LiveMatch:
         for p in presences:
             if p.get("puuid") != self.self_puuid:
                 continue
-            if p.get("product") == "league_of_legends":
+            if p.get("product") not in (None, "", "valorant"):
                 continue
             priv = self._decode_private(p.get("private"))
             if "matchPresenceData" in priv:
                 return priv["matchPresenceData"].get("sessionLoopState", "MENUS")
             return priv.get("sessionLoopState", "MENUS")
-        return "MENUS"
+        return "OFFLINE"
 
-    def party_map(self, puuids, presences) -> dict:
-        pass
-        parties: dict[str, list] = {}
+    def party_map(self, puuids, presences, teams=None) -> list[dict]:
+        puuids = set(puuids)
+        teams = teams or {}
+        parent = {p: p for p in puuids}
+        live_pid: dict[str, str] = {}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def link(group, pid=None):
+            group = [m for m in group if m in puuids]
+            for m in group:
+                if pid:
+                    live_pid[m] = pid
+                parent[find(m)] = find(group[0])
+
+        own = riot_client.own_party_members(self.auth)
+        link([m["Subject"] for m in own], "own-party")
+
+        by_pid: dict[str, list] = {}
         for p in presences:
             if p.get("puuid") not in puuids:
                 continue
             priv = self._decode_private(p.get("private"))
             if not priv.get("isValid"):
                 continue
-            if "partyPresenceData" in priv:
-                size = priv["partyPresenceData"].get("partySize", 0)
-                pid = priv["partyPresenceData"].get("partyId", "")
-            else:
-                size = priv.get("partySize", 0)
-                pid = priv.get("partyId", "")
-            if size > 1 and pid:
-                parties.setdefault(pid, []).append(p["puuid"])
-        return {pid: m for pid, m in parties.items() if len(m) > 1}
+            data = priv.get("partyPresenceData", priv)
+            if data.get("partySize", 0) > 1 and data.get("partyId"):
+                by_pid.setdefault(data["partyId"], []).append(p["puuid"])
+        for pid, group in by_pid.items():
+            if len(group) > 1:
+                link(group, pid)
+
+        for a in puuids:
+            hit = _KD_CACHE.get(a)
+            for mid in (hit[1] if hit else ()):
+                md = _MATCH_DETAIL_CACHE.get(mid)
+                if not isinstance(md, dict):
+                    continue
+                pids = {pl.get("subject"): pl.get("partyId") for pl in md.get("players", [])}
+                if not pids.get(a):
+                    continue
+                link([a] + [b for b, pid in pids.items()
+                            if b != a and b in puuids and pid == pids[a]
+                            and teams.get(a) == teams.get(b)])
+
+        two_teams = len(set(teams.values())) == 2
+        groups: dict[tuple, list] = {}
+        for p in puuids:
+            groups.setdefault((find(p), teams.get(p) if two_teams else None), []).append(p)
+        self_team = teams.get(self.self_puuid)
+        out = []
+        for (root, side), members in groups.items():
+            if len(members) < 2:
+                continue
+            members.sort()
+            pid = next((live_pid[m] for m in members if m in live_pid), f"likely-{members[0]}")
+            out.append({
+                "id": (f"{pid}-{side}" if side != self_team and (root, self_team) in groups
+                       else pid),
+                "members": members,
+                "inferred": not all(m in live_pid for m in members),
+            })
+        out.sort(key=lambda g: (self.self_puuid not in g["members"],
+                                teams.get(g["members"][0]) != self_team, g["members"][0]))
+        return out
 
     def party_members(self, presences) -> list:
-        pass
+        own = riot_client.own_party_members(self.auth)
+        if own:
+            out = []
+            for m in own:
+                ident = m.get("PlayerIdentity") or {}
+                out.append({"puuid": m["Subject"],
+                            "incognito": bool(ident.get("Incognito")),
+                            "level": ident.get("AccountLevel", 0),
+                            "level_hidden": bool(ident.get("HideAccountLevel")),
+                            "card": ident.get("PlayerCardID"),
+                            "title": ident.get("PlayerTitleID")})
+            return out
+
         def _fields(priv):
             data = priv.get("partyPresenceData", priv)
             pid = data.get("partyId", "")
             player = priv.get("playerPresenceData", priv)
-            return pid, player.get("accountLevel", 0)
+            return pid, player.get("accountLevel", 0), player
 
         my_party = None
         for p in presences:
@@ -260,10 +323,12 @@ class LiveMatch:
             priv = self._decode_private(p.get("private"))
             if not priv.get("isValid"):
                 continue
-            pid, level = _fields(priv)
+            pid, level, player = _fields(priv)
             if pid == my_party:
                 members.append({"puuid": p["puuid"], "level": level,
-                                "incognito": False})
+                                "incognito": False,
+                                "card": player.get("playerCardId"),
+                                "title": player.get("playerTitleId")})
         return members or [{"puuid": self.self_puuid, "level": 0, "incognito": False}]
 
     def reveal_names(self, puuids) -> dict:
@@ -443,8 +508,8 @@ class LiveMatch:
             hist = self.auth.pd_get(
                 f"/match-history/v1/history/{puuid}?startIndex=0&endIndex=10{q}",
                 retries=3)
-            throttled = throttled or _is_throttled(hist)
-            entries = (hist or {}).get("History", []) if isinstance(hist, dict) else []
+            throttled = not isinstance(hist, dict) or "History" not in hist
+            entries = [] if throttled else hist["History"] or []
             mids = [e["MatchID"] for e in entries if e.get("MatchID")]
             if mids or throttled:
                 is_comp = bool(mids) and queue == "competitive"
@@ -461,8 +526,8 @@ class LiveMatch:
             if hit:
                 mids, is_comp, _ = self._fresh_mids(puuid)
                 rank_key = mids[0] if (mids and is_comp) else "nocomp"
-                if hit[1] is None:
-                    _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (hit[0], rank_key))
+                if hit[1] is None and time.time() - hit[2] < _MIDS_TTL:
+                    _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (hit[0], rank_key, hit[2]))
                     return hit[0]
                 if hit[1] == rank_key:
                     return hit[0]
@@ -503,7 +568,7 @@ class LiveMatch:
             games = cur.get("NumberOfGames", 0) or 0
             out["games"] = games
             out["wr"] = round(wins / games * 100) if games else 0
-            _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (out, rank_key))
+            _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (out, rank_key, time.time()))
         except Exception:
             pass
         return out
@@ -651,9 +716,11 @@ class LiveMatch:
     def _spawn_kd_fill(self, match_id, puuids, season, prev_season) -> None:
         pass
         with _KD_FILL_LOCK:
-            if match_id in _KD_FILLING:
+            keys = {f"{match_id}:{p}" for p in puuids} - _KD_FILLING
+            if not keys:
                 return
-            _KD_FILLING.add(match_id)
+            _KD_FILLING.update(keys)
+            puuids = [p for p in puuids if f"{match_id}:{p}" in keys]
 
         def _run():
             try:
@@ -674,7 +741,7 @@ class LiveMatch:
                     elif status == "empty":
 
                         entry["kd_done"] = True
-                    elif status == "throttled":
+                    elif status == "throttled" and entry["kd_tries"] < 20:
 
                         pass
                     elif entry["kd_tries"] >= 6:
@@ -712,7 +779,7 @@ class LiveMatch:
                     list(ex.map(_top_up, puuids))
             finally:
                 with _KD_FILL_LOCK:
-                    _KD_FILLING.discard(match_id)
+                    _KD_FILLING.difference_update(keys)
 
         threading.Thread(target=_run, daemon=True,
                          name=f"kd-fill-{match_id[:8]}").start()
@@ -764,15 +831,26 @@ class LiveMatch:
         else:
             weapons_by_puuid = meta[ld_key]
 
-        pmap = self.party_map(puuids, presences)
+        pmap = self.party_map(puuids, presences,
+                              {p["Subject"]: p.get("TeamID") for p in raw_players})
         party_lookup = {}
         parties_out = []
-        for idx, (pid, members) in enumerate(pmap.items()):
-            color = party_color(idx)
-            parties_out.append({"id": pid, "color": color, "number": idx + 1,
-                                "size": len(members), "members": members})
-            for m in members:
-                party_lookup[m] = {"id": pid, "color": color, "number": idx + 1}
+        numbers = meta.setdefault("party_numbers", {})
+        taken: set[int] = set()
+        for g in pmap:
+            known = sorted({numbers[m] for m in g["members"] if m in numbers} - taken)
+            g["number"] = known[0] if known else max([0, *numbers.values(), *taken]) + 1
+            taken.add(g["number"])
+            numbers.update(dict.fromkeys(g["members"], g["number"]))
+        for g in sorted(pmap, key=lambda g: g["number"]):
+            number = g["number"]
+            color = party_color(number - 1)
+            parties_out.append({"id": g["id"], "color": color, "number": number,
+                                "size": len(g["members"]), "members": g["members"],
+                                "inferred": g["inferred"]})
+            for m in g["members"]:
+                party_lookup[m] = {"id": g["id"], "color": color, "number": number,
+                                   "inferred": g["inferred"]}
 
         season = self.season_id()
         prev_season = self.prev_season_id()
@@ -866,6 +944,7 @@ class LiveMatch:
                 title=valapi.title_text(ident.get("PlayerTitleID")),
                 smurf=smurf, smurf_reasons=smurf_reasons,
             ))
+            players[-1]["statsPending"] = bool(include_stats and not cached.get("kd_done"))
 
         map_name = map_name_from_path(map_id)
         score = self.match_score(presences) if state == "INGAME" else None
@@ -879,12 +958,14 @@ class LiveMatch:
 
         _LAST_BOARD["board"] = board
         _LAST_BOARD["at"] = time.time()
+        _LAST_BOARD["puuid"] = self.self_puuid
         return board
 
     def _held_board(self):
         pass
         b = _LAST_BOARD.get("board")
-        if b and (time.time() - _LAST_BOARD.get("at", 0.0)) < _HOLD_SECS:
+        if (b and _LAST_BOARD.get("puuid") == self.self_puuid
+                and (time.time() - _LAST_BOARD.get("at", 0.0)) < _HOLD_SECS):
             return b
         return None
 
@@ -992,14 +1073,14 @@ class LiveMatch:
         players = []
         for m, rk, kd, hs, lvl, intel in fetched:
             puuid = m["puuid"]
-            ident = {"AccountLevel": lvl, "HideAccountLevel": False,
+            ident = {"AccountLevel": lvl, "HideAccountLevel": m.get("level_hidden", False),
                      "Incognito": m.get("incognito", False)}
             name, level, level_hidden = self.resolve_identity(puuid, names, ident)
             smurf, smurf_reasons = compute_smurf(
                 level=level, peak_tier=rk["peak"], rank_tier=rk["tier"],
                 kd=kd, win_rate=rk["wr"], games=rk["games"])
             players.append(assemble_player(
-                puuid=puuid, name=name, name_hidden=False, team="Blue",
+                puuid=puuid, name=name, name_hidden=m.get("incognito", False), team="Blue",
                 is_self=(puuid == self.self_puuid), agent_id="",
                 rank_tier=rk["tier"], rr=rk["rr"], leaderboard=rk["lb"],
                 peak_tier=rk["peak"], prev_tier=rk.get("prev", 0),
@@ -1008,7 +1089,10 @@ class LiveMatch:
                 level=level, level_hidden=level_hidden,
                 party=party, peak_act=self.act_episode(rk.get("peak_season")),
                 smurf=smurf, smurf_reasons=smurf_reasons,
+                player_card=valapi.player_card(m.get("card")),
+                title=valapi.title_text(m.get("title")),
             ))
+            players[-1]["playerCardSmall"] = valapi.player_card(m.get("card"), "small")
 
         parties_out = [{**party, "members": puuids}] if party else []
         board = finalize(players, state="MENUS", source="local", self_team="Blue",
@@ -1049,7 +1133,8 @@ class LiveMatch:
                 mate["name"] = names.get(mate["puuid"]) or _fallback_name(mate["puuid"])
 
         updates = {}
-        if any((row.get("mode") or "").lower() == "competitive" for row in matches):
+        if (riot_client.held_secs("/mmr/") <= 0
+                and any((row.get("mode") or "").lower() == "competitive" for row in matches)):
             try:
                 cu = self.auth.pd_get(
                     f"/mmr/v1/players/{puuid}/competitiveupdates"
@@ -1178,12 +1263,51 @@ class LiveMatch:
 
         hits: dict = {}
         heads: dict = {}
+        dealt: dict = {}
+        first_k: dict = {}
+        first_d: dict = {}
+        multi: dict = {}
+        aces: dict = {}
+        plants: dict = {}
+        defuses: dict = {}
+        subject_team = next((p.get("teamId") for p in md.get("players", []) or []
+                             if p.get("subject") == subject), None)
+        timeline = []
+        queue_id = (info.get("queueID") or info.get("queueId") or "").lower()
+        round_mode = (len(md.get("roundResults", []) or []) >= 2
+                      and queue_id not in ("deathmatch", "hurm"))
         for rr in md.get("roundResults", []):
+            round_kills = []
             for ps in rr.get("playerStats", []):
                 s = ps.get("subject")
                 for dmg in ps.get("damage", []):
                     hits[s] = hits.get(s, 0) + dmg.get("legshots", 0) +                        dmg.get("bodyshots", 0) + dmg.get("headshots", 0)
                     heads[s] = heads.get(s, 0) + dmg.get("headshots", 0)
+                    dealt[s] = dealt.get(s, 0) + (dmg.get("damage", 0) or 0)
+                kills = ps.get("kills", []) or []
+                round_kills.extend(kills)
+                if len(kills) >= 3:
+                    multi[s] = multi.get(s, 0) + 1
+                if len(kills) >= 5:
+                    aces[s] = aces.get(s, 0) + 1
+            if round_kills:
+                first = min(round_kills, key=lambda k: k.get("roundTime", k.get("timeSinceRoundStartMillis", 0)) or 0)
+                if first.get("killer"):
+                    first_k[first["killer"]] = first_k.get(first["killer"], 0) + 1
+                if first.get("victim"):
+                    first_d[first["victim"]] = first_d.get(first["victim"], 0) + 1
+            if rr.get("bombPlanter"):
+                plants[rr["bombPlanter"]] = plants.get(rr["bombPlanter"], 0) + 1
+            if rr.get("bombDefuser"):
+                defuses[rr["bombDefuser"]] = defuses.get(rr["bombDefuser"], 0) + 1
+            if subject and subject_team:
+                timeline.append({
+                    "n": (rr.get("roundNum") or 0) + 1,
+                    "won": rr.get("winningTeam") == subject_team,
+                    "how": rr.get("roundResult") or rr.get("roundResultCode"),
+                    "kills": sum(1 for k in round_kills if k.get("killer") == subject),
+                    "died": any(k.get("victim") == subject for k in round_kills),
+                })
 
         raw = md.get("players", []) or []
         names = self.reveal_names([p.get("subject") for p in raw])
@@ -1220,6 +1344,13 @@ class LiveMatch:
                 "kd": round(k / d, 2) if d else float(k),
                 "acs": round(st.get("score", 0) / rounds) if rounds else 0,
                 "hsPct": round(heads.get(sub, 0) / th * 100) if th else None,
+                "adr": round(dealt.get(sub, 0) / rounds) if (round_mode and dealt) else None,
+                "firstBloods": first_k.get(sub, 0) if round_mode else None,
+                "firstDeaths": first_d.get(sub, 0) if round_mode else None,
+                "multiKills": multi.get(sub, 0) if round_mode else None,
+                "aces": aces.get(sub, 0) if round_mode else None,
+                "plants": plants.get(sub, 0) if round_mode else None,
+                "defuses": defuses.get(sub, 0) if round_mode else None,
                 "rankTier": rank_meta["tier"], "rank": rank_meta["name"],
                 "rankColor": rank_meta["color"], "rankIcon": valapi.rank_icon(rank_meta["tier"]),
                 "rr": rank.get("rr") or 0, "leaderboard": rank.get("lb") or 0,
@@ -1237,6 +1368,9 @@ class LiveMatch:
             sp = next((p for p in raw if p.get("subject") == subject), None)
             if sp:
                 won = teams.get(sp.get("teamId"), {}).get("won")
+        if won is False and not any(t.get("won") for t in teams.values()):
+            round_scores = {t.get("roundsWon", 0) for t in teams.values()}
+            won = "draw" if len(round_scores) == 1 else None
         subject_team = next((p.get("team") for p in players if p.get("isSubject")), None)
         if players:
             players[0]["isMatchMvp"] = True
@@ -1262,6 +1396,7 @@ class LiveMatch:
             "result": ("Victory" if won is True else "Defeat" if won is False
                        else ("Draw" if won is not None else None)),
             "players": players, "teamStats": team_stats,
+            "rounds": timeline if round_mode else [],
         }
 
 def _career_summary(matches: list) -> dict:
@@ -1334,7 +1469,7 @@ def _team_stats(team_players: list) -> dict:
     pass
     ranked = [p["rankTier"] for p in team_players if (p.get("rankTier") or 0) > 0]
     kds = [p["kd"] for p in team_players if p.get("kd") is not None]
-    wrs = [p["winRate"] for p in team_players if p.get("winRate") is not None]
+    wrs = [p["winRate"] for p in team_players if p.get("winRate") is not None and p.get("games")]
     avg_tier = sum(ranked) / len(ranked) if ranked else 0
     rank_meta = rank_from_tier(round(avg_tier)) if ranked else rank_from_tier(0)
     return {
@@ -1348,15 +1483,19 @@ def _team_stats(team_players: list) -> dict:
         "size": len(team_players),
     }
 
-def _win_prob(self_stats: dict, enemy_stats: dict) -> int:
+def _win_prob(self_stats: dict, enemy_stats: dict) -> int | None:
     pass
     prob = 50.0
-    prob += (self_stats["avgRankTier"] - enemy_stats["avgRankTier"]) * 5
+    used = False
+    if self_stats["avgRankTier"] and enemy_stats["avgRankTier"]:
+        prob += (self_stats["avgRankTier"] - enemy_stats["avgRankTier"]) * 5
+        used = True
     self_kd = self_stats["avgKd"]
     enemy_kd = enemy_stats["avgKd"]
     if self_kd is not None and enemy_kd is not None:
         prob += (self_kd - enemy_kd) * 20
-    return max(5, min(95, round(prob)))
+        used = True
+    return max(5, min(95, round(prob))) if used else None
 
 def finalize(players, *, state, source, self_team, map_name, queue, match_id,
              parties, map_splash=None, score=None):

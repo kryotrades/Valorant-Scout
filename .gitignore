@@ -50,3 +50,8 @@ ops/
 # Claude Code local config
 .claude/
 node_modules_bak/
+
+# Cloudflare (OpenNext / wrangler)
+frontend/.open-next/
+frontend/.wrangler/
+frontend/.dev.vars*

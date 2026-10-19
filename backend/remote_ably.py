@@ -47,6 +47,16 @@ def _slim_for_ably(board: dict) -> dict:
     if isinstance(out.get("teams"), dict):
         out["teams"] = {t: [slim_player(p) for p in plist]
                         for t, plist in out["teams"].items()}
+    if isinstance(out.get("recap"), dict):
+        recap = dict(out["recap"])
+        if isinstance(recap.get("players"), list):
+            recap["players"] = [slim_player(p) for p in recap["players"]]
+        for k in ("you", "mvp", "teamMvp"):
+            if k in recap:
+                recap[k] = slim_player(recap[k])
+        out["recap"] = recap
+    if isinstance(out.get("session"), dict) and out["session"].get("points"):
+        out["session"] = {**out["session"], "points": []}
     return out
 
 class RemoteConfigError(Exception):
@@ -69,6 +79,10 @@ class RemoteController:
 
     def attach_router(self, router) -> None:
         self.router = router
+
+    def phone_count(self) -> int:
+        sess = self._session
+        return len(sess.get("phones", ())) if sess else 0
 
     def is_active(self) -> bool:
         return self._active
@@ -260,22 +274,16 @@ class RemoteController:
 
         await cmd_ch.subscribe(on_cmd)
 
-        try:
-            async def on_presence(member):
-                cid = str(getattr(member, "client_id", "") or "")
-                action = str(getattr(member, "action", "") or "")
-                if cid.startswith("phone"):
-                    sess["phone_seen"] = True
-
-                    if action in ("enter", "present", ""):
-                        await self._publish_board(state_ch)
-            await state_ch.presence.subscribe(on_presence)
-            for m in (await state_ch.presence.get()) or []:
-                if str(getattr(m, "client_id", "") or "").startswith("phone"):
-                    sess["phone_seen"] = True
-        except Exception:
-
-            pass
+        async def refresh_phones():
+            try:
+                members = (await state_ch.presence.get()).items
+            except Exception:
+                return
+            phones = {m.connection_id or m.client_id for m in members
+                      if str(m.client_id or "").startswith("phone")}
+            if phones:
+                sess["phone_seen"] = True
+            sess["phones"] = phones
 
         sess["ready"].set()
 
@@ -289,9 +297,12 @@ class RemoteController:
                 threading.Thread(target=self.disable, daemon=True).start()
 
         async def state_pump():
-
+            tick = 0
             while not stop.is_set():
                 await self._publish_board(state_ch)
+                if tick % 5 == 0:
+                    await refresh_phones()
+                tick += 1
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=4.0)
                 except asyncio.TimeoutError:

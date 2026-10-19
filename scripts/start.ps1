@@ -95,6 +95,14 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
                 Write-Host ""
             } else {
 
+
+                if (Test-Path $UpdateStateFile) {
+                    Write-Host ""
+                    Write-ScoutLog -Log launcher -Level ERROR -Code VS-UPDATE-001 -Message "startup blocked: auto-update to $tag failed and its rollback did not finish"
+                    Show-FatalDialog "Valorant Scout can't start: the update to $tag failed and couldn't be rolled back automatically.`n`nClose VALORANT if it is open and start Valorant Scout again to retry the rollback. If that keeps failing, re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat." "update"
+                    exit 1
+                }
+
                 $env:VS_UPDATE_AVAILABLE = $tag
                 Write-ScoutLog -Log launcher -Level WARN -Message "auto-update to $tag failed (rc=$LASTEXITCODE); launching current version"
                 Write-Host "  Couldn't install the update - starting your current version." -ForegroundColor Yellow
@@ -109,6 +117,7 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
 
 Show-Phase 3 "Starting Valorant Scout..."
 Stop-RunningApp "launcher" | Out-Null
+
 
 
 

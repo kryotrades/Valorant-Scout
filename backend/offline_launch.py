@@ -447,6 +447,8 @@ def _fetch_cert() -> bool:
         with open(tmp, "wb") as f:
             f.write(pem)
         ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(tmp)
+        if _pem_expired(tmp):
+            raise ValueError("leaf cert is expired")
         os.replace(tmp, _CACHED_CERT)
         _dbg("cert: fetched Deceive pfx + cached as PEM")
         return True
@@ -459,25 +461,38 @@ def _fetch_cert() -> bool:
         return False
 
 
+def _pem_expired(path: str) -> bool:
+    try:
+        from cryptography import x509
+        with open(path, "rb") as f:
+            leaf = x509.load_pem_x509_certificate(f.read())
+        return leaf.not_valid_after_utc.timestamp() <= time.time()
+    except Exception:
+        return False
+
+
 def ensure_cert() -> str:
     try:
         age = time.time() - os.path.getmtime(_CACHED_CERT)
-        if 0 <= age < _CERT_CACHE_TTL and os.path.getsize(_CACHED_CERT) > 0:
+        if 0 <= age < _CERT_CACHE_TTL and os.path.getsize(_CACHED_CERT) > 0 \
+                and not _pem_expired(_CACHED_CERT):
             return _CACHED_CERT
     except OSError:
         pass
     if _fetch_cert():
         return _CACHED_CERT
     if os.path.isfile(_CACHED_CERT) and os.path.getsize(_CACHED_CERT) > 0:
-        _dbg("cert: fetch failed — using stale cached trusted cert")
-        return _CACHED_CERT
+        if not _pem_expired(_CACHED_CERT):
+            _dbg("cert: fetch failed — using stale cached trusted cert")
+            return _CACHED_CERT
+        _dbg("cert: fetch failed and cached cert is expired; not using it")
     if os.path.isfile(CERT_PATH) and os.path.getsize(CERT_PATH) > 0:
         _dbg("cert: WARNING no trusted cert available; using bundled self-signed. "
              "The Riot client will REJECT this — check network access to "
              f"{CERT_URL} (Deceive's cert host).")
         return CERT_PATH
     raise RuntimeError(
-        f"No offline-mode cert available: fetch from {CERT_URL} failed and no cache "
+        f"No offline-mode cert available: fetch from {CERT_URL} failed and no usable cache "
         f"or bundled fallback at {CERT_PATH}."
     )
 
@@ -550,10 +565,8 @@ class _Conn:
 
     def capture(self, raw: str) -> None:
         self.last_presence = raw
-        private = _extract_valorant_private(raw)
-        if private:
-            self.last_private = private
-            self.captured_at = time.time()
+        self.last_private = _extract_valorant_private(raw)
+        self.captured_at = time.time()
 
 
 class _Engine:
@@ -575,7 +588,6 @@ class _Engine:
             if self.started:
                 return
             cert = ensure_cert()
-            _reset_log()
             saved = _load_status()
             self.status = saved if saved != "online" else _DEFAULT_STATUS
             self.connected = False
@@ -756,7 +768,9 @@ class _Engine:
             pass
 
     async def _handle_fake_command(self, chunk: str, conn):
-        m = re.search(r"<body>(.*?)</body>", chunk, re.DOTALL)
+        msg = re.search(rf"<message\b[^>]*{re.escape(_FAKE_JID)}[^>]*(?<!/)>(.*?)</message>",
+                        chunk, re.DOTALL)
+        m = msg and re.search(r"<body>(.*?)</body>", msg.group(1), re.DOTALL)
         if not m:
             return
         body = m.group(1).strip().lower()
@@ -926,7 +940,9 @@ def _helper_request(command: str, payload: dict | None = None,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
         return result if isinstance(result, dict) else None
-    except Exception:
+    except Exception as e:
+        if isinstance(getattr(e, "reason", e), ConnectionRefusedError):
+            _remove_helper_info(info["token"])
         return None
 
 
@@ -1124,6 +1140,7 @@ def _helper_main() -> int:
                 self.end_headers()
                 self.wfile.write(body)
 
+    _reset_log()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     _write_helper_info(server.server_address[1], token)
     _dbg(f"helper: ready pid={os.getpid()} port={server.server_address[1]}")

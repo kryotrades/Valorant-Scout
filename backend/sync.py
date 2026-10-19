@@ -16,12 +16,13 @@ _SYNC_URL = os.getenv("SCOUT_SYNC_URL", "https://valorantscout.com/api/sync")
 _INTERVAL = 60
 _worker: "_Worker | None" = None
 
-_LATEST = {"state": None, "name": None, "rank": None, "rankTier": None}
+_LATEST = {"state": None, "name": None, "rank": None, "rankTier": None, "at": 0.0}
 
 def observe(board: dict) -> None:
     pass
     try:
         _LATEST["state"] = board.get("state")
+        _LATEST["at"] = time.time()
         me = next((p for p in board.get("players", []) if p.get("isSelf")), None)
         if me and me.get("name") and "#" in str(me.get("name")):
             _LATEST["name"] = me["name"]
@@ -113,7 +114,8 @@ class _Worker:
                     "n": _LATEST.get("name") or self.name,
                     "v": APP_VERSION,
                     "r": self.region,
-                    "s": _LATEST.get("state") or ("MENUS" if LocalAuth.available() else "OFFLINE"),
+                    "s": ((_LATEST.get("state") if time.time() - _LATEST["at"] < _INTERVAL else None)
+                          or ("MENUS" if LocalAuth.available() else "OFFLINE")),
                     "up": int(time.time() - self.started),
                     "lv": self.level,
                     "os": self.os,

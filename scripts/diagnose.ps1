@@ -109,20 +109,27 @@ function Get-PortOwner([int]$port) {
         $portPid = $c.OwningProcess
         try {
             $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$portPid" -ErrorAction Stop
-            $exe = $proc.ExecutablePath
             $rootLower = $Root.ToLower()
 
 
 
-            if ($exe) {
-                $exeLower = $exe.ToLower()
-                if ($exeLower -eq $rootLower -or $exeLower.StartsWith($rootLower + '\')) { return "ours (Valorant Scout, PID $portPid)" }
+            $cur = $proc
+            for ($hop = 0; $hop -lt 3 -and $cur; $hop++) {
+
+
+
+                $exe = $cur.ExecutablePath
+                if ($exe) {
+                    $exeLower = $exe.ToLower()
+                    if ($exeLower -eq $rootLower -or $exeLower.StartsWith($rootLower + '\')) { return "ours (Valorant Scout, PID $portPid)" }
+                }
+                if ($cur.CommandLine) {
+                    $cmdLower = $cur.CommandLine.ToLower()
+                    if ($cmdLower -eq $rootLower -or $cmdLower.Contains($rootLower + '\')) { return "ours (Valorant Scout, PID $portPid)" }
+                }
+                $cur = Get-CimInstance Win32_Process -Filter "ProcessId=$($cur.ParentProcessId)" -ErrorAction SilentlyContinue
             }
-            if ($proc.CommandLine) {
-                $cmdLower = $proc.CommandLine.ToLower()
-                if ($cmdLower -eq $rootLower -or $cmdLower.Contains($rootLower + '\')) { return "ours (Valorant Scout, PID $portPid)" }
-            }
-            return "foreign: $(Split-Path -Leaf ($exe + '')) (PID $portPid)"
+            return "foreign: $(Split-Path -Leaf ($proc.ExecutablePath + '')) (PID $portPid)"
         } catch { return "unknown process (PID $portPid)" }
     }
     return "free"

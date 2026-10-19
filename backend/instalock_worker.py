@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import random
 import threading
 
 from agents import resolve_agent
-from riot_client import LocalAuth
+from riot_client import LocalAuth, chat_presences
 from vconstants import map_name_from_path
 
 MIN_DELAY_S = 4.0
@@ -16,6 +17,8 @@ def _self_session_state(presences: list, puuid: str) -> str | None:
     pass
     for p in presences or []:
         if p.get("puuid") != puuid:
+            continue
+        if p.get("product") not in (None, "", "valorant"):
             continue
         priv = p.get("private")
         if not priv or "{" in str(priv):
@@ -67,6 +70,11 @@ class InstalockWorker:
             if not resolve_agent(name):
                 return {"ok": False,
                         "message": f"Unknown agent '{name}' for map '{mapn}'."}
+        if os.getenv("ALLOW_LIVE_INSTALOCK", "true").lower() != "true":
+            return {"ok": True, "status": "dry-run", "agent": agent["name"],
+                    "perMap": per_map_norm,
+                    "message": f"DRY-RUN: would {mode} {agent['name']} when agent "
+                               f"select starts (ALLOW_LIVE_INSTALOCK=false)."}
         delay = max(MIN_DELAY_S, float(delay or 0)) + random.uniform(0, JITTER_S)
         self.stop()
         with self._lock:
@@ -114,15 +122,22 @@ class InstalockWorker:
 
         while not stop.is_set():
             try:
-                presences = (auth.local_get("/chat/v4/presences") or {}).get("presences", [])
+                presences = chat_presences(auth)
                 st = _self_session_state(presences, auth.puuid)
                 if st == "PREGAME":
+                    auth.headers(refresh=True)
                     pg = auth.glz_get(f"/pregame/v1/players/{auth.puuid}")
                     mid = pg.get("MatchID") if isinstance(pg, dict) else None
                     if mid and mid not in done:
                         if delay > 0 and stop.wait(delay):
                             break
                         match = auth.glz_get(f"/pregame/v1/matches/{mid}")
+                        tries = 0
+                        while per_map and not (match or {}).get("MapID") and tries < 3:
+                            tries += 1
+                            if stop.wait(1.0):
+                                break
+                            match = auth.glz_get(f"/pregame/v1/matches/{mid}")
                         side = _side_from_match(match, auth.puuid)
                         map_name = map_name_from_path((match or {}).get("MapID", ""))
 
@@ -135,10 +150,17 @@ class InstalockWorker:
                         agent_id = chosen["uuid"]
                         if stop.is_set():
                             break
-                        auth.glz_post(f"/pregame/v1/matches/{mid}/select/{agent_id}")
-                        if mode == "lock":
-                            auth.glz_post(f"/pregame/v1/matches/{mid}/lock/{agent_id}")
+                        r = auth.glz_post(f"/pregame/v1/matches/{mid}/select/{agent_id}")
+                        if mode == "lock" and r.status_code < 400:
+                            r = auth.glz_post(f"/pregame/v1/matches/{mid}/lock/{agent_id}")
                         done.add(mid)
+                        if r.status_code >= 400:
+                            self._update(
+                                stop, running=False, status="error", side=side,
+                                agent=chosen["name"], map=map_name,
+                                message=f"Riot refused {chosen['name']} "
+                                        f"(HTTP {r.status_code}) — pick manually.")
+                            return
                         self._update(
                             stop, running=False, status="locked", side=side,
                             agent=chosen["name"], map=map_name,
@@ -157,7 +179,9 @@ class InstalockWorker:
                     break
             except Exception:
                 try:
-                    auth.headers(refresh=True)
+                    fresh = LocalAuth(region)
+                    fresh.headers()
+                    auth = fresh
                 except Exception:
                     pass
                 if stop.wait(1.5):

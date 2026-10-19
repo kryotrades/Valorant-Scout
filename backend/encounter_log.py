@@ -26,7 +26,13 @@ def _load() -> dict:
         if isinstance(raw, dict):
             out["discardedLegacyPlayers"] = sum(isinstance(v, dict) for v in raw.values())
         return out
+    except FileNotFoundError:
+        return _empty_store()
     except Exception:
+        try:
+            os.replace(_PATH, f"{_PATH}.unreadable-{int(time.time())}")
+        except OSError:
+            pass
         return _empty_store()
 
 
@@ -37,6 +43,8 @@ def _save() -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(_STORE, fh, ensure_ascii=False, separators=(",", ":"))
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, _PATH)
         finally:
             if os.path.exists(tmp):
@@ -52,8 +60,18 @@ _STORE = _load()
 _save()
 
 
+_LEDGERS = frozenset({"matchIds", "resultMatchIds", "agentMatchIds", "withStatMatchIds",
+                      "againstStatMatchIds", "lastMatchId", "lastResultMatchId"})
+_RAW = _LEDGERS | {"withStats", "againstStats", "agentCounts", "agentPortraits", "agentColors"}
+
+
+def _riot_id(name: object) -> str | None:
+    return name if isinstance(name, str) and "#" in name else None
+
+
 def _public_entry(source: dict) -> dict:
-    row = dict(source)
+    row = {key: value for key, value in source.items() if key not in _RAW}
+    row["name"] = _riot_id(source.get("name"))
     for side in ("with", "against"):
         stats = source.get(f"{side}Stats") or {}
         games = int(stats.get("games") or 0)
@@ -126,8 +144,9 @@ def record_board(board: dict | None) -> None:
                 entry["lastMatchId"] = match_id
             for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
                         "rankIcon", "rankColor", "kd", "winRate", "level"):
-                if player.get(key) is not None and entry.get(key) != player.get(key):
-                    entry[key] = player.get(key)
+                value = _riot_id(player.get(key)) if key == "name" else player.get(key)
+                if value is not None and entry.get(key) != value:
+                    entry[key] = value
                     changed = True
             entry["lastSeen"] = now
             agent = player.get("agent")
@@ -234,15 +253,17 @@ def backfill_career(owner: str | None, matches: list[dict] | None) -> int:
                 if seen_at >= int(entry.get("lastSeen") or 0):
                     for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
                                 "rankIcon", "rankColor", "kd", "winRate", "level"):
-                        if player.get(key) is not None:
-                            entry[key] = player[key]
+                        value = _riot_id(player.get(key)) if key == "name" else player.get(key)
+                        if value is not None:
+                            entry[key] = value
                     entry["lastSeen"] = seen_at
                     entry["lastMatchId"] = match_id
                 else:
                     for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
                                 "rankIcon", "rankColor", "level"):
-                        if entry.get(key) is None and player.get(key) is not None:
-                            entry[key] = player[key]
+                        value = _riot_id(player.get(key)) if key == "name" else player.get(key)
+                        if entry.get(key) is None and value is not None:
+                            entry[key] = value
                 agent = player.get("agent")
                 if agent and agent != "Unknown":
                     if agent not in entry.setdefault("agents", []):
@@ -290,8 +311,9 @@ def enrich_player(owner: str | None, puuid: str | None, fields: dict | None) -> 
         dirty = False
         for key in ("name", "rank", "peakRank", "rankTier", "peakTier",
                     "rankIcon", "rankColor", "kd", "winRate", "level"):
-            if fields.get(key) is not None and entry.get(key) != fields.get(key):
-                entry[key] = fields.get(key)
+            value = _riot_id(fields.get(key)) if key == "name" else fields.get(key)
+            if value is not None and entry.get(key) != value:
+                entry[key] = value
                 dirty = True
         if dirty:
             _save()
@@ -359,12 +381,16 @@ def get_one(owner: str | None, puuid: str) -> dict | None:
         return None
     with _LOCK:
         entry = _players(owner).get(puuid)
-        return dict(entry) if entry else None
+        return {k: v for k, v in entry.items() if k not in _LEDGERS} if entry else None
 
 
 def encounter_for(owner: str | None, puuid: str, match_id: str | None = None,
                   same_team: bool = False) -> dict | None:
-    entry = get_one(owner, puuid)
+    if not owner or not puuid:
+        return None
+    with _LOCK:
+        entry = _players(owner).get(puuid)
+        entry = dict(entry) if entry else None
     if not entry:
         return None
     out = {

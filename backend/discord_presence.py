@@ -150,7 +150,8 @@ class _Worker:
     def _build(self) -> dict | None:
         import live_match
         try:
-            board = live_match.LiveMatch(LocalAuth(self.region)).build_scoreboard(
+            auth = LocalAuth(self.region)
+            board = live_match.LiveMatch(auth).build_scoreboard(
                 include_stats=False)
         except Exception:
             return None
@@ -172,7 +173,7 @@ class _Worker:
                 from riot_client import _self_presence_private
                 from vconstants import rank_from_tier
                 import valapi
-                priv = _self_presence_private(LocalAuth(self.region)) or {}
+                priv = _self_presence_private(auth) or {}
                 tier = (priv.get("playerPresenceData") or {}).get("competitiveTier") or 0
                 if tier:
                     rank_name = rank_from_tier(tier)["name"]

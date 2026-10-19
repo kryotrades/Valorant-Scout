@@ -106,6 +106,21 @@ class ClientNotReady(Exception):
     pass
 
 
+def _pid_exists(pid: int) -> bool:
+    if os.name != "nt":
+        return True
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    h = k32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return ctypes.get_last_error() != 87
+    try:
+        code = ctypes.c_ulong()
+        return not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value == 259
+    finally:
+        k32.CloseHandle(h)
+
+
 class LocalAuth:
     pass
 
@@ -129,7 +144,14 @@ class LocalAuth:
     def available() -> bool:
         path = os.path.join(os.getenv("LOCALAPPDATA", ""),
                             r"Riot Games\Riot Client\Config\lockfile")
-        return os.path.isfile(path)
+        if not os.path.isfile(path):
+            return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                pid = int(f.read().split(":")[1])
+        except (OSError, ValueError, IndexError):
+            return True
+        return _pid_exists(pid)
 
     def _get_lockfile(self) -> dict:
         path = os.path.join(os.getenv("LOCALAPPDATA", ""),
@@ -174,7 +196,7 @@ class LocalAuth:
                 except Exception:
                     continue
                 v = (priv.get("partyPresenceData") or {}).get("partyClientVersion")                    or priv.get("partyClientVersion")
-                if v:
+                if v and v != "unknown":
                     _CLIENT_VERSION = v
                     _log(f"client version (local presence): {v}")
                     return v
@@ -358,6 +380,27 @@ def _self_presence_private(auth: LocalAuth) -> dict | None:
         except Exception:
             return None
     return None
+
+_OWN_PARTY: dict = {"at": 0.0, "members": []}
+
+def own_party_members(auth: LocalAuth) -> list[dict]:
+    now = time.time()
+    if now - _OWN_PARTY["at"] < 5:
+        return _OWN_PARTY["members"]
+    priv = _self_presence_private(auth) or {}
+    try:
+        pid = (priv.get("partyPresenceData") or {}).get("partyId") or priv.get("partyId")
+        if not pid:
+            me = auth.glz_get(f"/parties/v1/players/{auth.puuid}")
+            pid = me.get("CurrentPartyID") if isinstance(me, dict) else None
+        party = auth.glz_get(f"/parties/v1/parties/{pid}") if pid else {"Members": []}
+    except Exception:
+        party = None
+    members = party.get("Members") if isinstance(party, dict) else None
+    if isinstance(members, list):
+        _OWN_PARTY["members"] = [m for m in members if isinstance(m, dict) and m.get("Subject")]
+    _OWN_PARTY["at"] = now
+    return _OWN_PARTY["members"]
 
 def party_snapshot(auth: LocalAuth) -> dict:
     pass
@@ -676,6 +719,7 @@ class RiotClient:
             return {"ok": False, "status": "error",
                     "message": f"Unknown agent '{agent_identifier}'."}
 
+        dry_run = dry_run or not self.allow_live_instalock
         if dry_run:
             print(f"[INSTALOCK:DRY-RUN] would {mode} {agent['name']}", flush=True)
             return {
@@ -696,9 +740,12 @@ class RiotClient:
             if not match_id:
                 return {"ok": False, "status": "error",
                         "message": "Not in agent select (no pregame match)."}
-            auth.glz_post(f"/pregame/v1/matches/{match_id}/select/{agent_uuid}")
-            if mode == "lock":
-                auth.glz_post(f"/pregame/v1/matches/{match_id}/lock/{agent_uuid}")
+            r = auth.glz_post(f"/pregame/v1/matches/{match_id}/select/{agent_uuid}")
+            if mode == "lock" and r.status_code < 400:
+                r = auth.glz_post(f"/pregame/v1/matches/{match_id}/lock/{agent_uuid}")
+            if r.status_code >= 400:
+                return {"ok": False, "status": "error",
+                        "message": f"Riot refused {agent['name']} (HTTP {r.status_code})."}
             return {"ok": True, "status": "locked", "agent": agent["name"],
                     "message": f"{mode.title()}ed {agent['name']}."}
         except Exception as e:
@@ -707,7 +754,7 @@ class RiotClient:
 
     def dodge(self, dry_run: bool = True, region: str | None = None) -> dict:
         pass
-        if dry_run:
+        if dry_run or not self.allow_live_instalock:
             print("[DODGE:DRY-RUN] would quit agent select", flush=True)
             return {"ok": True, "status": "dry-run",
                     "message": "DRY-RUN: would dodge agent select. "
@@ -720,7 +767,10 @@ class RiotClient:
             if not match_id:
                 return {"ok": False, "status": "error",
                         "message": "Not in agent select (nothing to dodge)."}
-            auth.glz_post(f"/pregame/v1/matches/{match_id}/quit")
+            r = auth.glz_post(f"/pregame/v1/matches/{match_id}/quit")
+            if r.status_code >= 400:
+                return {"ok": False, "status": "error",
+                        "message": f"Riot refused the dodge (HTTP {r.status_code})."}
             return {"ok": True, "status": "dodged",
                     "message": "Dodged agent select."}
         except Exception as e:

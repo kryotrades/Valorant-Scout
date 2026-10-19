@@ -112,8 +112,15 @@ def load_env():
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, val = line.partition("=")
-            key, val = key.strip(), val.strip().strip('"').strip("'")
+            key, val = key.strip(), _env_value(val)
             os.environ.setdefault(key, val)
+
+def _env_value(val: str) -> str:
+    val = val.strip()
+    q = val[:1]
+    if q in ('"', "'") and val.find(q, 1) > 0:
+        return val[1:val.find(q, 1)]
+    return re.split(r"\s+#", val, maxsplit=1)[0].strip('"').strip("'")
 
 def venv_python() -> Path:
     return ROOT / ".venv" / ("Scripts/python.exe" if IS_WIN else "bin/python")
@@ -193,7 +200,7 @@ def _kill_leftover_instances() -> bool:
             ["powershell", "-NoProfile", "-Command",
              "$m = $env:VS_MATCH; Get-CimInstance Win32_Process -Filter "
              "\"Name like 'py%'\" | Where-Object { $_.CommandLine -and "
-             "$_.CommandLine.ToLower().Contains($m) } | "
+             "$_.CommandLine.ToLowerInvariant().Contains($m) } | "
              "ForEach-Object { $_.ProcessId }"],
             capture_output=True, text=True, timeout=20, env=env).stdout
         for tok in out.split():
@@ -304,7 +311,7 @@ def _is_ours(pid: int) -> bool:
         "$cur = %d; foreach ($hop in 1..3) { "
         "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$cur\"; "
         "if (-not $p) { break }; "
-        "$hay = (\"$($p.ExecutablePath) $($p.CommandLine)\").ToLower(); "
+        "$hay = (\"$($p.ExecutablePath) $($p.CommandLine)\").ToLowerInvariant(); "
         "if ($hay.Contains($env:VS_PREFIX)) { 'VS_OURS'; break }; "
         "if (-not $p.ParentProcessId) { break }; "
         "$cur = $p.ParentProcessId }" % pid
@@ -399,11 +406,17 @@ def choose_port(preferred, label: str, reserved=()) -> int:
         f"(first held by {holder or 'another program'}). Close it, or set "
         f"BACKEND_PORT / WS_PORT in backend\\.env to a free port.")
 
-def wait_http(url: str, timeout: float, label: str) -> bool:
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+def wait_http(url: str, timeout: float, label: str, proc=None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None and not _CLOSING \
+                and not (ATTACHED and proc.returncode in (0xC000013A, -1073741510)):
+            warn(f"{label} exited (code {proc.returncode}) before responding at {url}.")
+            return False
         try:
-            with urllib.request.urlopen(url, timeout=2) as r:
+            with _LOOPBACK_OPENER.open(url, timeout=2) as r:
                 if r.status < 500:
                     return True
         except Exception:
@@ -662,7 +675,7 @@ def main():
         _CTRL_KILL_PIDS.append(backend_proc.pid)
         _install_console_close_handler()
 
-        if not wait_http(f"http://127.0.0.1:{backend_port}/api/health", 40, "Backend"):
+        if not wait_http(f"http://127.0.0.1:{backend_port}/api/health", 40, "Backend", backend_proc):
             tail = tail_backend_log()
             LOG.error("VS-BACKEND-001 backend did not become healthy; last output:\n%s", tail)
             die("VS-BACKEND-001",
@@ -694,11 +707,11 @@ def main():
             roles[frontend_proc] = "frontend"
             if IS_WIN:
                 grouped.add(frontend_proc)
-            if not wait_http(f"http://127.0.0.1:{frontend_port}", 120, "Frontend"):
+            if not wait_http(f"http://127.0.0.1:{frontend_port}", 120, "Frontend", frontend_proc):
                 die("VS-FRONTEND-001",
                     "The local frontend did not start. Run diagnostics.bat for details.")
 
-        say(f"Dashboard will open at {frontend_url}/dashboard", C_OK)
+        say(f"Opening the dashboard ({frontend_url}) in your browser…", C_OK)
         if not local_frontend:
             say("Your browser may ask to allow local-network access — click Allow.", C_WARN)
 
@@ -726,6 +739,11 @@ def main():
                     die("VS-FRONTEND-001",
                         f"The local frontend stopped unexpectedly (exit {p.returncode}).")
                 if role == "scoreboard":
+                    if IS_WIN and not _CLOSING and p.returncode not in (0, 0xC000013A, -1073741510):
+                        die("VS-DEPS-001",
+                            f"The scoreboard stopped unexpectedly (exit {p.returncode}). "
+                            "Run install.bat to repair (your settings and data are kept). "
+                            "Details may be in .scout\\cli.log.")
                     say("Scoreboard closed — shutting down.", C_WARN)
                     LOG.info("scoreboard window closed; shutting down")
                     stop = True

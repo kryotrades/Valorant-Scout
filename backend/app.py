@@ -295,7 +295,7 @@ def build_live(seed: int = 7, want_state: str | None = None) -> dict:
     board = (sample_match.generate_lobby(seed)
              if (want_state or "").lower() == "menus"
              else sample_match.generate(seed))
-    board = _attach_encounters(board)
+    board = _remember_sample(_attach_encounters(board))
     if notice:
         board["notice"] = notice
     board["appVersion"] = APP_VERSION
@@ -320,7 +320,11 @@ def live():
         seed = int(request.args.get("seed", 7))
     except (TypeError, ValueError):
         seed = 7
-    return jsonify(build_live(seed, request.args.get("state")))
+    board = dict(build_live(seed, request.args.get("state")))
+    board["instalock"] = instalock_worker.status()
+    remote = getattr(_COMMAND_ROUTER, "remote_controller", None)
+    board["phones"] = remote.phone_count() if remote else 0
+    return jsonify(board)
 
 
 def _refresh_encounter_history(owner: str | None) -> None:
@@ -373,7 +377,7 @@ def encounters():
 
 def _encounters_payload(scope: str = "current", demo: bool = False) -> dict:
     if demo or client.source_pref == "demo":
-        return {"players": sample_match.encounters(), "accountCount": 1, "scope": scope}
+        return {"players": _remember_sample(sample_match.encounters()), "accountCount": 1, "scope": scope}
     owner = _current_puuid()
     if owner:
         with _ENCOUNTER_JOBS_LOCK:
@@ -390,8 +394,11 @@ def _encounters_payload(scope: str = "current", demo: bool = False) -> dict:
                 threading.Thread(target=refresh_encounters, daemon=True,
                                  name=f"encounters-{str(owner)[:8]}").start()
     scope = "all" if scope == "all" else "current"
-    payload = {"players": encounter_log.get_all_accounts(owner) if scope == "all"
-                    else encounter_log.get_all(owner),
+    players = encounter_log.get_all_accounts(owner) if scope == "all" else encounter_log.get_all(owner)
+    players = [p for p in players
+               if (p.get("winsWith") or 0) + (p.get("lossesWith") or 0) >= 2
+               or (p.get("winsAgainst") or 0) + (p.get("lossesAgainst") or 0) >= 2]
+    payload = {"players": players,
                "accountCount": encounter_log.account_count(), "scope": scope}
     if owner:
         with _ENCOUNTER_JOBS_LOCK:
@@ -406,7 +413,7 @@ def recap():
         seed = int(request.args.get("seed", 7))
     except (TypeError, ValueError):
         seed = 7
-    return jsonify(live_recap or sample_match.recap(seed))
+    return jsonify(live_recap or _remember_sample(sample_match.recap(seed)))
 
 
 def _current_puuid() -> str | None:
@@ -527,7 +534,6 @@ def _performance_payload(timezone_name: str | None = None, rich_limit: int = 20,
         payload["refreshing"] = owner in _PERFORMANCE_JOBS
     payload["sessions"] = session_tracker.list_for(owner)
     payload["matchMeta"] = match_meta.get_all(owner)
-    payload["encounters"] = encounter_log.get_all(owner)
     return payload
 
 
@@ -590,6 +596,33 @@ def encounter(puuid: str):
 def match_meta_update(match_id: str):
     return jsonify(match_meta.update(_current_puuid(), match_id.strip(), request.get_json(silent=True) or {}))
 
+_SAMPLE_IDS: set[str] = set()
+
+def _sample_match_detail(match_id, subject):
+    known = subject in _SAMPLE_IDS
+    out = _remember_sample(sample_match.match_detail(match_id, subject))
+    if subject and not known:
+        _SAMPLE_IDS.discard(subject)
+    return out
+
+
+def _remember_sample(data):
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if k in ("puuid", "matchId") and isinstance(v, str):
+                _SAMPLE_IDS.add(v)
+            else:
+                _remember_sample(v)
+    elif isinstance(data, list):
+        for v in data:
+            _remember_sample(v)
+    return data
+
+def _sample_ok(ident: str, demo: bool = False) -> bool:
+    ident = str(ident or "")
+    return (demo or client.source_pref == "demo" or ident.startswith("demo")
+            or ident in _SAMPLE_IDS)
+
 @app.get("/api/match/<match_id>")
 def match(match_id: str):
     pass
@@ -601,7 +634,9 @@ def match(match_id: str):
                 return jsonify(data)
         except Exception:
             app.logger.exception("match detail failed")
-    return jsonify(sample_match.match_detail(match_id, subject))
+    if not _sample_ok(match_id, request.args.get("demo") == "1"):
+        return jsonify({"error": "Couldn't load that match from Riot."}), 502
+    return jsonify(_sample_match_detail(match_id, subject))
 
 @app.get("/api/debug/reveal")
 def debug_reveal():
@@ -636,7 +671,9 @@ def profile(puuid: str):
             app.logger.exception("live profile failed")
             data = None
     if data is None:
-        data = sample_match.career(puuid)
+        if not _sample_ok(puuid, request.args.get("demo") == "1"):
+            return jsonify({"error": "Couldn't load this player's match history from Riot."}), 502
+        data = _remember_sample(sample_match.career(puuid))
 
     _CACHE[f"profile:{puuid}"] = (now, data)
     return jsonify(data)
@@ -811,7 +848,9 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
                 except Exception:
                     app.logger.exception("transport profile failed")
             if data is None:
-                data = sample_match.career(puuid)
+                if not _sample_ok(puuid, bool(params.get("demo"))):
+                    return {"error": "Couldn't load this player's match history from Riot."}
+                data = _remember_sample(sample_match.career(puuid))
             out = dict(data)
 
             out["weapons"] = _current_weapons(puuid)
@@ -833,7 +872,9 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
                         return d
                 except Exception:
                     app.logger.exception("transport match failed")
-            return sample_match.match_detail(match_id, subject)
+            if not _sample_ok(match_id, bool(params.get("demo"))):
+                return {"error": "Couldn't load that match from Riot."}
+            return _sample_match_detail(match_id, subject)
 
         if req_type == "encounter":
             return encounter_log.get_one(_current_puuid(), (params.get("puuid") or "").strip()) or {}
@@ -841,7 +882,7 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
         if req_type == "recap":
 
             live_recap = session_tracker.current_recap() if _live_enabled() else None
-            return live_recap or sample_match.recap(int(params.get("seed") or 7))
+            return live_recap or _remember_sample(sample_match.recap(int(params.get("seed") or 7)))
 
         if req_type == "encounters":
             return _encounters_payload(params.get("scope", "current"), bool(params.get("demo")))
@@ -883,6 +924,7 @@ def _start_ws_bridge() -> None:
         board["instalock"] = instalock_worker.status()
         board["agents"] = AGENTS
         board["liveInstalockEnabled"] = client.allow_live_instalock
+        board["phones"] = remote_controller.phone_count()
         return board
 
     remote_controller = remote_ably.RemoteController(

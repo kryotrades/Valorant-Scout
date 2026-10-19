@@ -51,8 +51,11 @@ def last_good(puuid: str | None = None) -> dict | None:
 def _contract_rewards() -> set:
     if "_contractskins" in valapi._cache:
         return valapi._cache["_contractskins"]
+    contracts = valapi._get("contracts")
+    if not contracts:
+        raise RuntimeError("contracts catalog unavailable")
     out = set()
-    for c in valapi._get("contracts") or []:
+    for c in contracts:
         for ch in (c.get("content") or {}).get("chapters") or []:
             rewards = list(ch.get("freeRewards") or [])
             rewards += [lv.get("reward") or {} for lv in ch.get("levels") or []]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -22,7 +23,13 @@ def _load_env():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, _, v = line.partition("=")
-                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                    v = v.strip()
+                    q = v[:1]
+                    if q in ('"', "'") and v.find(q, 1) > 0:
+                        v = v[1:v.find(q, 1)]
+                    else:
+                        v = re.split(r"\s+#", v, maxsplit=1)[0].strip('"').strip("'")
+                    os.environ.setdefault(k.strip(), v)
 
 _load_env()
 
@@ -34,7 +41,7 @@ try:
     from rich.table import Table
     from rich.text import Text
 except ImportError:
-    print("This view needs 'rich'.  Install with:  pip install rich")
+    print("This view needs 'rich', which is missing or broken. Run install.bat to repair Valorant Scout.")
     sys.exit(1)
 
 import sample_match
@@ -203,18 +210,24 @@ def render(board) -> Group:
         head += f"   [bold #ECE8E1]{board['map']}[/]   [grey62]{board.get('mode','')}[/]"
     if board.get("score"):
         sc = board["score"]
-        head += f"   [#18E5A7]{sc['ally']}[/][grey50]:[/][#FF4655]{sc['enemy']}[/] [grey50]RD {sc['round']}[/]"
+        rd = f" [grey50]RD {sc['round']}[/]" if sc.get("round") is not None else ""
+        head += f"   [#18E5A7]{sc['ally']}[/][grey50]:[/][#FF4655]{sc['enemy']}[/]{rd}"
     if board.get("lockProgress"):
         lp = board["lockProgress"]
         head += f"   [#FFB454]{lp['locked']}/{lp['total']} locked[/]"
     head += f"   {src}"
+
+    update = os.environ.get("VS_UPDATE_AVAILABLE", "").strip()
+    nudge = [Text(f"  Update {update} is available — run UPDATE.bat to apply it.",
+                  style="#FFB454")] if update else []
 
     notice = board.get("notice")
     if not board.get("players"):
         msg = ((notice or {}).get("message") or board.get("error")
                or "Open VALORANT — lobby, Agent Select or a match.")
         return Group(Panel(Text(f"No players to show.\n{msg}", justify="center"),
-                           title="VALORANT SCOUT", border_style="#FF4655", box=box.HEAVY))
+                           title="VALORANT SCOUT", border_style="#FF4655", box=box.HEAVY),
+                     *nudge)
 
     table = Table(box=box.SIMPLE_HEAVY, expand=False, show_edge=False, pad_edge=False,
                   header_style="bold #7E8C92", border_style="grey23")
@@ -254,7 +267,7 @@ def render(board) -> Group:
     if notice:
         tone = "#FF4655" if notice.get("level") == "warn" else "#FFB454"
         rows.append(Text(f"  ⚠ {notice['message']}", style=tone))
-    return Group(*rows)
+    return Group(*rows, *nudge)
 
 def main():
     ap = argparse.ArgumentParser(description="Valorant Scout terminal scoreboard")

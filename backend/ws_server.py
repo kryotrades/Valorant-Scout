@@ -5,6 +5,8 @@ import hmac
 import json
 import os
 import secrets
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -224,6 +226,19 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
             except Exception:
                 pass
 
+            async def answer(rtype, params, rid):
+                try:
+                    data = await loop.run_in_executor(
+                        None, lambda: request_handler(rtype, params))
+                    await _safe_send(websocket, {"type": "response",
+                                                 "id": rid, "ok": True,
+                                                 "data": data})
+                except Exception as e:
+                    await _safe_send(websocket, {"type": "response",
+                                                 "id": rid, "ok": False,
+                                                 "error": str(e)})
+
+            pending: set = set()
             try:
                 async for raw in websocket:
                     m = _parse(raw)
@@ -234,21 +249,10 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
                         await _safe_send(websocket, {"type": "pong"})
                         continue
                     if mtype == "request" and request_handler is not None:
-
-                        rtype = m.get("request")
-                        params = m.get("params") or {}
-                        rid = m.get("id")
-                        try:
-                            data = await loop.run_in_executor(
-                                None,
-                                lambda r=rtype, p=params: request_handler(r, p))
-                            await _safe_send(websocket, {"type": "response",
-                                                         "id": rid, "ok": True,
-                                                         "data": data})
-                        except Exception as e:
-                            await _safe_send(websocket, {"type": "response",
-                                                         "id": rid, "ok": False,
-                                                         "error": str(e)})
+                        task = asyncio.ensure_future(answer(
+                            m.get("request"), m.get("params") or {}, m.get("id")))
+                        pending.add(task)
+                        task.add_done_callback(pending.discard)
                         continue
                     if mtype == "command":
                         cmd = m.get("command")
@@ -373,7 +377,15 @@ def _spawn_opener(frontend_url: str, url: str, backend_port: int | None) -> None
             LOG.warning("backend health not confirmed before opening dashboard")
         opened = _wait(frontend_url.rstrip("/") + "/", time.time() + 90)
         try:
-            if not webbrowser.open(url):
+            if os.name == "nt":
+                r = subprocess.run(
+                    [sys.executable, "-I", "-c",
+                     "import sys, webbrowser; sys.exit(0 if webbrowser.open(sys.stdin.read()) else 1)"],
+                    input=url, text=True, timeout=30,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                if r.returncode != 0:
+                    raise RuntimeError(f"browser broker exited {r.returncode}")
+            elif not webbrowser.open(url):
                 raise RuntimeError("webbrowser.open returned False")
         except Exception:
             LOG.warning("VS-BROWSER-001 couldn't open a browser automatically")

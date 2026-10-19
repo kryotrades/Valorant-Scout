@@ -19,6 +19,7 @@ _RECAP_TTL = 600.0
 _MAX_POINTS = 40
 _MAX_ARCHIVE = 100
 _RECAP_GIVE_UP_S = 600
+_MAX_PENDING = 3
 
 _STATE = {
     "prev_state": None, "ingame_board": None, "recap": None,
@@ -58,6 +59,10 @@ def _load() -> dict:
         except FileNotFoundError:
             continue
         except Exception:
+            try:
+                os.replace(path, f"{path}.unreadable-{int(time.time())}")
+            except OSError:
+                pass
             return _empty_store()
     return _empty_store()
 
@@ -69,6 +74,8 @@ def _save() -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(_STORE, fh, separators=(",", ":"))
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, _PATH)
         finally:
             if os.path.exists(tmp):
@@ -237,6 +244,16 @@ def _self_rr(lm, match_id: str) -> dict | None:
     return None
 
 
+def _recent_avg(puuid, exclude_mid: str, key: str, n: int = 20):
+    with _LOCK:
+        account = _account(str(puuid))
+        sessions = [*(account.get("archive") or []), account.get("active") or {}]
+        points = [p for sess in sessions for p in (sess.get("points") or [])]
+    vals = [p[key] for p in points
+            if p.get("matchId") != exclude_mid and isinstance(p.get(key), (int, float))][-n:]
+    return round(sum(vals) / len(vals)) if vals else None
+
+
 def _build_recap(lm, ingame_board: dict) -> dict | None:
     match_id = ingame_board.get("matchId")
     if not match_id or match_id == "lobby":
@@ -245,7 +262,8 @@ def _build_recap(lm, ingame_board: dict) -> dict | None:
     if not isinstance(detail, dict) or detail.get("error"):
         return None
     detail_players = detail.get("players") or []
-    board_players = {p.get("puuid"): p for p in ingame_board.get("players") or []}
+    board_players = {p.get("puuid"): {k: v for k, v in p.items() if k != "weapons"}
+                     for p in ingame_board.get("players") or []}
     players = [{**board_players.get(p.get("puuid"), {}), **p} for p in detail_players]
     you = next((p for p in players if p.get("isSubject")), None)
     if not you:
@@ -254,16 +272,20 @@ def _build_recap(lm, ingame_board: dict) -> dict | None:
     team_mvp = next((p for p in players if p.get("team") == you.get("team")), None)
     self_row = next((p for p in ingame_board.get("players") or [] if p.get("isSelf")), {})
     rr = _self_rr(lm, match_id) if (ingame_board.get("mode") or "").lower() == "competitive" else None
+    round_based = bool(detail.get("rounds"))
     return {
         "matchId": match_id, "puuid": lm.self_puuid, "riotId": you.get("name"),
         "map": detail.get("map"), "mode": detail.get("mode"),
         "result": detail.get("result"), "scores": detail.get("scores"),
         "mvp": mvp, "teamMvp": team_mvp if team_mvp is not mvp else None,
         "you": you, "yourAvgKd": self_row.get("kd"),
+        "yourAvgAcs": _recent_avg(lm.self_puuid, match_id, "acs") if round_based else None,
+        "yourAvgHs": _recent_avg(lm.self_puuid, match_id, "hsPct") if round_based else None,
         "rrDelta": (rr or {}).get("delta"), "tierAfter": (rr or {}).get("tier"),
         "rrAfter": (rr or {}).get("rr"), "players": players,
         "mapSplash": detail.get("mapSplash") or ingame_board.get("mapSplash"),
         "teamStats": detail.get("teamStats") or ingame_board.get("teamStats"),
+        "rounds": detail.get("rounds") or [],
         "at": int(time.time()),
     }
 
@@ -301,28 +323,43 @@ def _push_session_point(recap: dict) -> None:
     _save()
 
 
+def _drop_snapshot(snap: dict) -> None:
+    if _STATE.get("ingame_board") is snap:
+        _STATE["ingame_board"] = None
+    _STATE["pending"] = [s for s in _STATE.get("pending") or [] if s is not snap]
+
+
 def observe(board: dict, lm) -> None:
     try:
         state = board.get("state")
-        prev = _STATE["prev_state"]
         _STATE["prev_state"] = state
         owner = getattr(lm, "self_puuid", None) or board.get("selfPuuid")
         _STATE["active_puuid"] = owner
-        previous_board = _STATE.get("ingame_board")
-        if previous_board and previous_board.get("selfPuuid") not in (None, owner):
-            _STATE["ingame_board"] = None
-            _STATE["recap"] = None
-        if state == "INGAME" and board.get("matchId"):
-            _STATE["ingame_board"] = board
-            return
-        if state == "PREGAME":
-            _STATE["recap"] = None
-            return
-        if state != "MENUS":
-            return
-        snap = _STATE["ingame_board"]
-        if not snap:
-            return
+        with _LOCK:
+            previous_board = _STATE.get("ingame_board")
+            if previous_board and previous_board.get("selfPuuid") not in (None, owner):
+                _STATE["ingame_board"] = None
+                _STATE["recap"] = None
+            pending = [s for s in _STATE.get("pending") or []
+                       if s.get("selfPuuid") in (None, owner)]
+            _STATE["pending"] = pending
+            if state == "INGAME" and board.get("matchId") and len(board.get("players") or []) > 1:
+                snap = _STATE["ingame_board"]
+                if snap and snap.get("matchId") != board.get("matchId"):
+                    pending = _STATE["pending"] = (pending + [snap])[-_MAX_PENDING:]
+                _STATE["ingame_board"] = board
+            elif state == "PREGAME":
+                _STATE["recap"] = None
+            elif state == "MENUS" and _STATE["ingame_board"]:
+                pending = pending + [_STATE["ingame_board"]]
+        for snap in pending:
+            _finish(snap, lm, owner)
+    except Exception:
+        pass
+
+
+def _finish(snap: dict, lm, owner) -> None:
+    try:
         match_id = snap.get("matchId")
         with _LOCK:
             key = (owner, match_id)
@@ -350,11 +387,12 @@ def observe(board: dict, lm) -> None:
                 history.invalidate(owner)
                 completed = True
                 with _LOCK:
-                    if _STATE.get("ingame_board") is snap:
-                        _STATE["ingame_board"] = None
+                    latest = _STATE.get("ingame_board") is snap
+                    _drop_snapshot(snap)
                     if generation == _STATE["generation"]:
-                        _STATE["recap"] = recap
-                        _STATE["recap_at"] = time.time()
+                        if latest and _STATE.get("prev_state") != "PREGAME":
+                            _STATE["recap"] = recap
+                            _STATE["recap_at"] = time.time()
                         if (recap.get("mode") or "").lower() == "competitive":
                             _push_session_point(recap)
             except Exception:
@@ -366,8 +404,8 @@ def observe(board: dict, lm) -> None:
                         started = first.setdefault(key, time.time())
                         if time.time() - started < _RECAP_GIVE_UP_S:
                             _STATE["recorded"].discard(key)
-                        elif _STATE.get("ingame_board") is snap:
-                            _STATE["ingame_board"] = None
+                        else:
+                            _drop_snapshot(snap)
 
         threading.Thread(target=finish, daemon=True, name=f"recap-{str(match_id)[:8]}").start()
     except Exception:

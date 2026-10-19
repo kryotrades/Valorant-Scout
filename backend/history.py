@@ -57,7 +57,13 @@ def _load() -> dict:
     try:
         with open(_PATH, encoding="utf-8") as fh:
             return _normalise_store(json.load(fh))
+    except FileNotFoundError:
+        return _empty_store()
     except Exception:
+        try:
+            os.replace(_PATH, f"{_PATH}.unreadable-{int(time.time())}")
+        except OSError:
+            pass
         return _empty_store()
 
 
@@ -68,6 +74,8 @@ def _save() -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(_STORE, fh, separators=(",", ":"))
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, _PATH)
         finally:
             if os.path.exists(tmp):
@@ -150,7 +158,7 @@ def _ensure_account(puuid: str, riot_id: str | None = None,
                     timezone_name: str | None = None) -> dict:
     accounts = _STORE.setdefault("accounts", {})
     account = accounts.setdefault(puuid, {"points": []})
-    if riot_id:
+    if riot_id and "#" in riot_id:
         account["riotId"] = riot_id
     if timezone_name:
         account["timezone"] = _valid_timezone(timezone_name)[0]
@@ -175,6 +183,8 @@ def record(point: dict, puuid: str | None = None, riot_id: str | None = None,
 def remember_account(puuid: str | None, riot_id: str | None = None) -> None:
     if not puuid or str(puuid).startswith("demo"):
         return
+    if riot_id and "#" not in riot_id:
+        riot_id = None
     with _LOCK:
         account = _STORE.get("accounts", {}).get(puuid)
         if (account and (not riot_id or account.get("riotId") == riot_id)

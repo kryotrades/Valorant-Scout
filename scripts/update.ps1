@@ -66,6 +66,22 @@ $staging = $null
 try {
     $lock = New-ScoutLock "update"
     $maintenanceMutex = New-ScoutMutex "Maintenance" "Another Valorant Scout install/update operation is already running. Wait for it to finish and retry."
+
+
+
+
+    $rel = $null
+    if (-not $LocalAssets) {
+        Step "Checking for updates ..."
+        $rel = Get-LatestRelease
+        if (-not (Test-Path $StateFile)) {
+            if (-not $rel) { Note "No update info (offline, or no releases yet) - nothing to do."; exit 0 }
+            if ((Compare-ScoutVersion $rel.tag_name (Get-LocalVersion)) -le 0) {
+                Ok "You're on the latest version (v$(Get-LocalVersion))."
+                exit 0
+            }
+        }
+    }
     Stop-RunningApp "update" | Out-Null
     $appMutex = New-ScoutMutex "App" "Valorant Scout is still running and couldn't be closed automatically. Close the scoreboard window before updating."
 
@@ -102,8 +118,6 @@ try {
         if (-not (Test-Path $zip)) { throw "missing local asset: $zip" }
         Note "Using local assets from $LocalAssets (v$newVersion)."
     } else {
-        Step "Checking for updates ..."
-        $rel = Get-LatestRelease
         if (-not $rel) { Note "No update info (offline, or no releases yet) - nothing to do."; exit 0 }
         $newVersion = ($rel.tag_name.Trim()) -replace '^[vV]', ''
         if ((Compare-ScoutVersion $newVersion (Get-LocalVersion)) -le 0) {
@@ -174,7 +188,10 @@ try {
     }
     $newRuntime = Get-Content (Join-Path $newRoot "runtime.json") -Raw -Encoding UTF8 | ConvertFrom-Json
     $newReqHash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $newRoot "backend\requirements.txt")).Hash.ToLowerInvariant()
-    $needsVenv = ($newReqHash -ne $oldReqHash -or [string]$newRuntime.pip.version -ne $oldPipVersion)
+
+
+    $needsVenv = ($newReqHash -ne $oldReqHash -or [string]$newRuntime.pip.version -ne $oldPipVersion -or
+                  [string]$newRuntime.python.version -ne [string]$currentRuntime.python.version)
     if ($needsVenv) {
         $venvBytes = (Get-ChildItem -Path $VenvDir -Recurse -File -ErrorAction SilentlyContinue |
             Measure-Object -Property Length -Sum).Sum
