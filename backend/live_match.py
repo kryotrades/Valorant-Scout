@@ -117,6 +117,26 @@ def form_streak(form: list) -> dict | None:
         n += 1
     return {"type": t, "count": n}
 
+_ROUNDS: dict = {"match": None, "ally": 0, "enemy": 0, "results": []}
+
+
+def track_rounds(match_id, score) -> list | None:
+    if not match_id or not score or score.get("round") is None:
+        return None
+    ally, enemy = int(score.get("ally") or 0), int(score.get("enemy") or 0)
+    t = _ROUNDS
+    if t["match"] != match_id or ally < t["ally"] or enemy < t["enemy"]:
+        t.update(match=match_id, ally=ally, enemy=enemy, results=["?"] * (ally + enemy))
+        return list(t["results"])
+    won, lost = ally - t["ally"], enemy - t["enemy"]
+    if won + lost == 1:
+        t["results"].append("W" if won else "L")
+    elif won + lost > 1:
+        t["results"].extend(["?"] * (won + lost))
+    t["ally"], t["enemy"] = ally, enemy
+    return list(t["results"])
+
+
 def compute_smurf(*, level, peak_tier, rank_tier, kd, win_rate, games) -> tuple[bool, list[str]]:
     pass
     reasons = smurf_signals(level=level, peak_tier=peak_tier, rank_tier=rank_tier,
@@ -950,6 +970,8 @@ class LiveMatch:
         score = self.match_score(presences) if state == "INGAME" else None
         if score and (queue or "").lower() in ("deathmatch", "hurm"):
             score["round"] = None
+        if score:
+            score["rounds"] = track_rounds(match_id, score)
         board = finalize(players, state=state, source="local", self_team=self_team,
                          map_name=map_name, queue=queue, match_id=match_id,
                          parties=parties_out, map_splash=valapi.map_splash(map_name),

@@ -23,8 +23,7 @@ _SKINS = ["Prime", "Reaver", "Glitchpop", "Sovereign", "Elderflame", "Oni",
 _TITLES = ["Hardcore", "Mastermind", "Marksman", "Ace", "Clutch", "Tactician",
            "Legend", "Sharpshooter", "First Blood", "Rookie", "Vandalizer"]
 
-_WEAPONS = ["Vandal", "Phantom", "Operator", "Sheriff", "Classic", "Ghost",
-            "Spectre", "Marshal", "Guardian", "Judge", "Bulldog", "Odin"]
+_WEAPONS = valapi.WEAPON_ORDER
 
 _CARDS = [
     "1711d20d-4b1c-c64a-14be-d4ae58a457c6", "c8b2f5fd-4331-b172-f3b7-c8a26f356a1f",
@@ -189,11 +188,15 @@ def generate(seed: int = 7) -> dict:
             ))
 
     ally, enemy = sorted([rng.randint(0, 13), rng.randint(0, 13)], reverse=True)
+    results = ["W"] * ally + ["L"] * enemy
+    rng.shuffle(results)
+    results[:min(3, len(results))] = ["?"] * min(3, len(results))
     board = finalize(players, state="INGAME", source="demo", self_team="Blue",
                      map_name=map_name, queue="competitive",
                      match_id=f"demo-{seed}", parties=parties_out,
                      map_splash=valapi.map_splash(map_name),
-                     score={"ally": ally, "enemy": enemy, "round": ally + enemy + 1})
+                     score={"ally": ally, "enemy": enemy, "round": ally + enemy + 1,
+                            "rounds": results})
     board["sourceDetail"] = "Demo lobby (open VALORANT for live data)"
 
     board["queue"] = demo_queue_state()

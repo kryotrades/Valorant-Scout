@@ -14,6 +14,7 @@ _AGENTS = {
     "Neon":      ("bb2a4828-46eb-8cd1-e765-15848195d751", DUELIST,    "#00CFFF"),
     "Iso":       ("0e38b510-41a8-5780-5e8f-568b2a4f2d6c", DUELIST,    "#574AC2"),
     "Waylay":    ("df1cb487-4902-002e-5c17-d28e83e78588", DUELIST,    "#82C3EB"),
+    "Hush":      ("ddd5a15c-4fbe-42fa-3789-11a55ca5ee04", DUELIST,    "#F47AC7"),
 
     "Sova":      ("320b2a48-4d9b-a075-30f1-1f93a9b638fa", INITIATOR,  "#3BA0E5"),
     "Breach":    ("5f8d3a7f-467b-97f3-062c-13acf203c006", INITIATOR,  "#C76B3B"),
