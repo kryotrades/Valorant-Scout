@@ -10,6 +10,7 @@ import uuid
 
 import encounter_log
 import history
+import match_meta
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _PATH = os.path.join(_DATA_DIR, "sessions.json")
@@ -95,18 +96,20 @@ def _account(puuid: str) -> dict:
     return _STORE.setdefault("accounts", {}).setdefault(str(puuid), {"active": None, "archive": []})
 
 
-def _summary(points: list[dict]) -> dict:
+def _summary(points: list[dict], carry: dict | None = None) -> dict:
+    carry = carry or {}
     rated = [p for p in points if p.get("result") in ("Victory", "Defeat")]
-    wins = sum(p.get("result") == "Victory" for p in rated)
-    losses = sum(p.get("result") == "Defeat" for p in rated)
+    matches = len(rated) + carry.get("matches", 0)
+    wins = sum(p.get("result") == "Victory" for p in rated) + carry.get("wins", 0)
+    losses = sum(p.get("result") == "Defeat" for p in rated) + carry.get("losses", 0)
     deltas = [p.get("delta") for p in points if isinstance(p.get("delta"), (int, float))]
     latest = next((p for p in reversed(points) if p.get("tier") is not None), None)
     best = max(points, key=lambda p: p.get("acs") or -1, default=None)
     worst = min(points, key=lambda p: p.get("delta") if isinstance(p.get("delta"), (int, float)) else 9999, default=None)
     return {
-        "matches": len(rated), "wins": wins, "losses": losses,
-        "winRate": round(100 * wins / len(rated)) if rated else None,
-        "net": sum(deltas), "currentTier": latest.get("tier") if latest else None,
+        "matches": matches, "wins": wins, "losses": losses,
+        "winRate": round(100 * wins / matches) if matches else None,
+        "net": sum(deltas) + carry.get("net", 0), "currentTier": latest.get("tier") if latest else None,
         "currentRr": latest.get("rr") if latest else None,
         "bestMatchId": best.get("matchId") if best else None,
         "worstMatchId": worst.get("matchId") if worst else None,
@@ -117,7 +120,7 @@ def _session_view(session: dict | None) -> dict | None:
     if not session:
         return None
     points = list(session.get("points") or [])
-    return {**session, "points": points, "summary": _summary(points)}
+    return {**session, "points": points, "summary": _summary(points, session.get("carry"))}
 
 
 def _clean_goal(goal: object) -> dict | None:
@@ -153,9 +156,10 @@ def start(puuid: str | None, goal: object = None, baseline: dict | None = None) 
     with _LOCK:
         account = _account(str(puuid))
         current = account.get("active")
-        if current and current.get("points"):
+        if current:
             current["endedAt"] = now
-            current["summary"] = _summary(current.get("points") or [])
+        if current and current.get("points"):
+            current["summary"] = _summary(current.get("points") or [], current.get("carry"))
             account.setdefault("archive", []).append(current)
             account["archive"] = account["archive"][-_MAX_ARCHIVE:]
         baseline = baseline or {}
@@ -196,9 +200,10 @@ def end(puuid: str | None) -> dict:
         if not current:
             return {"ok": False, "message": "No session is running."}
         current["endedAt"] = now
-        current["summary"] = _summary(current.get("points") or [])
-        account.setdefault("archive", []).append(current)
-        account["archive"] = account["archive"][-_MAX_ARCHIVE:]
+        current["summary"] = _summary(current.get("points") or [], current.get("carry"))
+        if current.get("points"):
+            account.setdefault("archive", []).append(current)
+            account["archive"] = account["archive"][-_MAX_ARCHIVE:]
         account["active"] = None
         _STATE["generation"] += 1
         _save()
@@ -217,6 +222,18 @@ def delete(puuid: str | None, session_id: str | None) -> dict:
         account["archive"] = kept
         _save()
         return {"ok": True, "message": "Session deleted.", "sessionId": session_id}
+
+
+def forget_account(puuid: str, current: str | None) -> dict:
+    result = history.forget_account(puuid, current)
+    if not result.get("ok"):
+        return result
+    with _LOCK:
+        if _STORE.get("accounts", {}).pop(puuid, None) is not None:
+            _save()
+    match_meta.forget(puuid)
+    encounter_log.forget(puuid)
+    return result
 
 
 def reset(puuid: str | None = None, goal: object = None) -> dict:
@@ -280,6 +297,7 @@ def _build_recap(lm, ingame_board: dict) -> dict | None:
         "mvp": mvp, "teamMvp": team_mvp if team_mvp is not mvp else None,
         "you": you, "yourAvgKd": self_row.get("kd"),
         "yourAvgAcs": _recent_avg(lm.self_puuid, match_id, "acs") if round_based else None,
+        "yourAvgPerf": _recent_avg(lm.self_puuid, match_id, "perf") if round_based else None,
         "yourAvgHs": _recent_avg(lm.self_puuid, match_id, "hsPct") if round_based else None,
         "rrDelta": (rr or {}).get("delta"), "tierAfter": (rr or {}).get("tier"),
         "rrAfter": (rr or {}).get("rr"), "players": players,
@@ -301,25 +319,38 @@ def _point_from_recap(recap: dict) -> dict:
         "agent": you.get("agent"), "agentPortrait": you.get("agentPortrait"),
         "kills": you.get("kills"), "deaths": you.get("deaths"),
         "assists": you.get("assists"), "kd": you.get("kd"),
-        "acs": you.get("acs"), "hsPct": you.get("hsPct"),
+        "acs": you.get("acs"), "hsPct": you.get("hsPct"), "perf": you.get("perf"),
         "scores": recap.get("scores"), "resultExact": True,
     }
 
 
-def _push_session_point(recap: dict) -> None:
+def _push_session_point(recap: dict, session_id: str | None = None) -> None:
     owner = recap.get("puuid")
     if not owner:
         return
     point = _point_from_recap(recap)
     account = _account(str(owner))
     active = account.get("active")
+    if session_id is not None:
+        active = next((s for s in [active, *(account.get("archive") or [])]
+                       if s and s.get("id") == session_id), None)
     if not active:
         return
-    if any(p.get("matchId") == point.get("matchId") for p in active.get("points") or []):
-        return
-    active.setdefault("points", []).append(point)
+    existing = next((p for p in active.get("points") or []
+                     if p.get("matchId") == point.get("matchId")), None)
+    if existing is not None:
+        existing.update(point)
+    else:
+        active.setdefault("points", []).append(point)
+    dropped = active["points"][:-_MAX_POINTS]
+    if dropped:
+        lost, carry = _summary(dropped), active.setdefault("carry", {})
+        for key in ("matches", "wins", "losses", "net"):
+            carry[key] = carry.get(key, 0) + lost[key]
     active["points"] = active["points"][-_MAX_POINTS:]
     active["lastAt"] = int(time.time())
+    if "endedAt" in active:
+        active["summary"] = _summary(active["points"], active.get("carry"))
     _save()
 
 
@@ -339,6 +370,8 @@ def observe(board: dict, lm) -> None:
             previous_board = _STATE.get("ingame_board")
             if previous_board and previous_board.get("selfPuuid") not in (None, owner):
                 _STATE["ingame_board"] = None
+            recap = _STATE.get("recap")
+            if recap and recap.get("puuid") not in (None, owner):
                 _STATE["recap"] = None
             pending = [s for s in _STATE.get("pending") or []
                        if s.get("selfPuuid") in (None, owner)]
@@ -366,10 +399,13 @@ def _finish(snap: dict, lm, owner) -> None:
             if key in _STATE["recorded"]:
                 return
             _STATE["recorded"].add(key)
-            generation = _STATE["generation"]
+            account = _account(str(owner))
+            generation, ended_session, ended_account = _STATE.setdefault("ended_in", {}).setdefault(
+                key, (_STATE["generation"], account.get("active"), account))
 
         def finish():
             completed = False
+            session_id = ended_session["id"] if ended_session else None
             try:
                 recap = None
                 for delay in (0, 2, 5):
@@ -389,12 +425,34 @@ def _finish(snap: dict, lm, owner) -> None:
                 with _LOCK:
                     latest = _STATE.get("ingame_board") is snap
                     _drop_snapshot(snap)
+                    _STATE["ended_in"].pop(key, None)
+                    if (recap.get("mode") or "").lower() == "competitive" and session_id is not None:
+                        account = _STORE.get("accounts", {}).get(str(owner))
+                        if (account is ended_account and not ended_session.get("points")
+                                and "endedAt" in ended_session):
+                            account.setdefault("archive", []).append(ended_session)
+                            account["archive"].sort(key=lambda s: s["startedAt"])
+                            account["archive"] = account["archive"][-_MAX_ARCHIVE:]
+                        _push_session_point(recap, session_id)
                     if generation == _STATE["generation"]:
                         if latest and _STATE.get("prev_state") != "PREGAME":
                             _STATE["recap"] = recap
                             _STATE["recap_at"] = time.time()
-                        if (recap.get("mode") or "").lower() == "competitive":
-                            _push_session_point(recap)
+                if (recap.get("mode") or "").lower() != "competitive":
+                    return
+                if recap.get("rrDelta") is None:
+                    for delay in (3, 6, 12):
+                        time.sleep(delay)
+                        rr = _self_rr(lm, recap["matchId"])
+                        if rr and rr.get("delta") is not None:
+                            with _LOCK:
+                                recap.update(rrDelta=rr["delta"], tierAfter=rr.get("tier"), rrAfter=rr.get("rr"))
+                                if session_id is not None:
+                                    _push_session_point(recap, session_id)
+                            history.record(_point_from_recap(recap), puuid=recap.get("puuid"),
+                                           riot_id=recap.get("riotId"))
+                            history.invalidate(owner)
+                            break
             except Exception:
                 pass
             finally:
@@ -406,6 +464,7 @@ def _finish(snap: dict, lm, owner) -> None:
                             _STATE["recorded"].discard(key)
                         else:
                             _drop_snapshot(snap)
+                            _STATE["ended_in"].pop(key, None)
 
         threading.Thread(target=finish, daemon=True, name=f"recap-{str(match_id)[:8]}").start()
     except Exception:

@@ -54,15 +54,30 @@ function Remove-LegacyCaches {
         $p = Join-Path $Root $stale
         if (Test-Path $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
     }
+
+
+    if (-not (Test-Path (Join-Path $Root ".git"))) {
+        foreach ($stale in @("scripts\build-release.ps1", "scripts\strip_comments.py", "scripts\strip_script_comments.ps1",
+                "scripts\verify-release.ps1", "scripts\verify-version.ps1", "scripts\verify-requirements-lock.ps1",
+                "scripts\verify-no-runtime-installs.ps1", "docs\seo-baseline-2026-08-02.md")) {
+            $p = Join-Path $Root $stale
+            if (Test-Path $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+        }
+    }
 }
 
-Write-Host ""
-Write-Host "  VALORANT SCOUT - UPDATE" -ForegroundColor Red
+
+$fromLauncher = $env:VS_FROM_LAUNCHER -eq "1"
+if (-not $fromLauncher) { Show-Banner "UPDATE" }
+$StageTotal = 5
 
 $lock = $null
 $maintenanceMutex = $null
 $appMutex = $null
 $staging = $null
+
+
+$journalOwned = $false
 try {
     $lock = New-ScoutLock "update"
     $maintenanceMutex = New-ScoutMutex "Maintenance" "Another Valorant Scout install/update operation is already running. Wait for it to finish and retry."
@@ -72,7 +87,7 @@ try {
 
     $rel = $null
     if (-not $LocalAssets) {
-        Step "Checking for updates ..."
+        if (-not $fromLauncher) { Write-Host ""; Note "Checking for updates ..." }
         $rel = Get-LatestRelease
         if (-not (Test-Path $StateFile)) {
             if (-not $rel) { Note "No update info (offline, or no releases yet) - nothing to do."; exit 0 }
@@ -83,10 +98,12 @@ try {
         }
     }
     Stop-RunningApp "update" | Out-Null
+    Stop-ValorantWatcher
     $appMutex = New-ScoutMutex "App" "Valorant Scout is still running and couldn't be closed automatically. Close the scoreboard window before updating."
 
 
 
+    $journalOwned = $true
     Resume-InterruptedUpdate | Out-Null
 
     if (-not (Is-Installed)) {
@@ -116,7 +133,10 @@ try {
         $zipName  = "valorant-scout-v$newVersion.zip"
         $zip      = Join-Path $LocalAssets $zipName
         if (-not (Test-Path $zip)) { throw "missing local asset: $zip" }
-        Note "Using local assets from $LocalAssets (v$newVersion)."
+        Write-Host ""
+        Write-Host "   Updating v$(Get-LocalVersion) to v$newVersion" -ForegroundColor White
+        Stage "Downloading v$newVersion"
+        Note "Using local assets from $LocalAssets."
     } else {
         if (-not $rel) { Note "No update info (offline, or no releases yet) - nothing to do."; exit 0 }
         $newVersion = ($rel.tag_name.Trim()) -replace '^[vV]', ''
@@ -124,11 +144,20 @@ try {
             Ok "You're on the latest version (v$(Get-LocalVersion))."
             exit 0
         }
-        Step "Updating v$(Get-LocalVersion) -> v$newVersion ..."
+        Write-Host ""
+        Write-Host "   Updating v$(Get-LocalVersion) to v$newVersion" -ForegroundColor White
+        Write-Host "   Your settings and match data are kept." -ForegroundColor DarkGray
+        Stage "Downloading v$newVersion"
+        Use-WritableTemp update
 
         $zipName = "valorant-scout-v$newVersion.zip"
         $zipUrl = $null
-        foreach ($a in $rel.assets) { if ($a.name -eq $zipName) { $zipUrl = $a.browser_download_url } }
+        foreach ($a in $rel.assets) {
+            if ($a.name -eq $zipName) {
+                $zipUrl = $a.browser_download_url
+                if ($a.size) { Note ("From github.com ({0:n1} MB) ..." -f ($a.size / 1MB)) }
+            }
+        }
         if (-not $zipUrl) {
             throw "release v$newVersion has no '$zipName' asset — refusing to update from an incomplete release."
         }
@@ -147,6 +176,7 @@ try {
             }
         }
         if (-not $okDl) { throw "couldn't download '$zipName' after 3 attempts." }
+        Ok "Downloaded."
     }
 
     if (-not $staging) {
@@ -165,7 +195,7 @@ try {
 
 
 
-    Step "Extracting the download ..."
+    Stage "Unpacking"
     $extract = Join-Path $staging "tree"
     Expand-Archive -Path $zip -DestinationPath $extract -Force
 
@@ -193,6 +223,12 @@ try {
     $needsVenv = ($newReqHash -ne $oldReqHash -or [string]$newRuntime.pip.version -ne $oldPipVersion -or
                   [string]$newRuntime.python.version -ne [string]$currentRuntime.python.version)
     if ($needsVenv) {
+
+
+        $busy = Get-VenvBusyProcess
+        if ($busy) {
+            throw "Couldn't replace .venv: $($busy.Name) (PID $($busy.ProcessId)) is still running from it. Close VALORANT if it is open (Valorant Scout's offline-chat helper runs until VALORANT exits), then run the update again."
+        }
         $venvBytes = (Get-ChildItem -Path $VenvDir -Recurse -File -ErrorAction SilentlyContinue |
             Measure-Object -Property Length -Sum).Sum
         if ($null -eq $venvBytes) { $venvBytes = 0 }
@@ -208,7 +244,7 @@ try {
 
     $newFiles = @(Get-ChildItem -Path $newRoot -Recurse -File -Name | ForEach-Object { [string]$_ })
     if ($newFiles.Count -lt 20) { throw "the downloaded release looks incomplete ($($newFiles.Count) files)." }
-    Ok "Download extracted ($($newFiles.Count) files, v$newVersion)."
+    Ok "Unpacked $($newFiles.Count) files."
 
 
     foreach ($rel in $newFiles) {
@@ -224,7 +260,7 @@ try {
     New-Item -ItemType Directory -Path $backupDir | Out-Null
 
     $added = @()
-    Step "Backing up the current version ..."
+    Stage "Backing up your current version"
     foreach ($rel in $newFiles) {
         $src = Resolve-RepoPath $rel
         if (Test-Path $src) {
@@ -234,6 +270,15 @@ try {
         } else {
             $added += $rel
         }
+    }
+
+
+
+
+    $dataDir = Join-Path $Root "backend\data"
+    if (Test-Path -LiteralPath $dataDir) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $backupDir "backend") | Out-Null
+        Copy-Item -LiteralPath $dataDir -Destination (Join-Path $backupDir "backend\data") -Recurse -Force
     }
 
     $state = @{
@@ -248,7 +293,8 @@ try {
     Write-ScoutLog -Log update -Message "applying v$newVersion (backup at $backupDir)"
 
 
-    Step "Applying update v$newVersion (your settings and data are preserved) ..."
+    Ok "Backup saved - it is restored automatically if anything goes wrong."
+    Stage "Installing v$newVersion"
     try {
 
 
@@ -269,7 +315,8 @@ try {
         Write-UpdateState $state
 
 
-        Step "Validating the updated installation ..."
+        Ok "Files updated."
+        Stage "Checking the new version works"
         if ((Get-LocalVersion) -ne $newVersion) { throw "VERSION file mismatch after apply." }
 
         if ($needsVenv) {
@@ -304,7 +351,7 @@ try {
 
         $bport = Get-FreePort
         do { $wport = Get-FreePort } while ($wport -eq $bport)
-        Note "Boot-checking the updated app (ports $bport/$wport) ..."
+        Note "Starting it once in the background to make sure ..."
         $bootEnv = @{
             BACKEND_PORT = "$bport"; WS_PORT = "$wport"
             SCOUT_NO_BROWSER = "1"; SCOUT_SYNC = "false"; DATA_SOURCE = "demo"
@@ -339,9 +386,10 @@ try {
             try {
                 if (-not $proc.HasExited) {
                     & taskkill /PID $proc.Id /T 2>&1 | Out-Null
-                    try { [void]$proc.WaitForExit(5000) } catch { }
+
+                    if ($LASTEXITCODE -eq 0) { try { [void]$proc.WaitForExit(5000) } catch { } }
                     if (-not $proc.HasExited) {
-                        Warn2 "boot-check process ignored graceful shutdown; forcing it closed."
+                        Write-ScoutLog -Log update -Message "boot-check process ignored graceful shutdown; forcing it closed"
                         & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
                     }
                 }
@@ -364,23 +412,39 @@ try {
         }
         Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
         Write-ScoutLog -Log update -Message "updated to v$newVersion"
+        Ok "Everything checks out."
         Write-Host ""
-        Ok "Update complete - now on v$newVersion. Launch with start.bat."
+        if ($fromLauncher) {
+            Write-Host "   Updated to v$newVersion - starting Scout." -ForegroundColor Green
+        } else {
+            Write-Host ("  " + ("=" * 58)) -ForegroundColor DarkGray
+            Write-Host "   Update complete - you are on v$newVersion." -ForegroundColor Green
+            Write-Host "   Open Scout with the Valorant Scout desktop shortcut, or start.bat." -ForegroundColor Gray
+            Write-Host ("  " + ("=" * 58)) -ForegroundColor DarkGray
+        }
         exit 0
     } catch {
+        Write-Host ""
         Fail "Update failed: $($_.Exception.Message)"
         Write-ScoutLog -Log update -Level ERROR -Code VS-UPDATE-001 -Message $_.Exception.Message
         Restore-FromBackup ([pscustomobject]$state)
         exit 1
     }
 } catch {
+    Write-Host ""
     Fail "Update failed: $($_.Exception.Message)"
     Write-ScoutLog -Log update -Level ERROR -Code VS-UPDATE-001 -Message $_.Exception.Message
-    if (Test-Path $StateFile) {
-        Write-Host "  Automatic rollback could not finish. Do not launch; re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat." -ForegroundColor Yellow
-    } else {
-        Write-Host "  Nothing was changed. See $(Join-Path $ScoutDir 'update.log')." -ForegroundColor Yellow
+    if ($journalOwned -and (Test-Path $StateFile)) {
+        Write-Host "         The automatic rollback could not finish. Do not open Scout yet:" -ForegroundColor Yellow
+        Write-Host "         re-extract the last release over this folder, delete" -ForegroundColor Yellow
+        Write-Host "         .scout\update-state.json, then run install.bat." -ForegroundColor Yellow
+    } elseif ($lock) {
+        Write-Host "         Nothing was changed. Scout still works as before." -ForegroundColor Yellow
+        Write-Host "         Details: $(Join-Path $ScoutDir 'update.log')" -ForegroundColor DarkGray
     }
+
+
+    if (-not $journalOwned) { exit 2 }
     exit 1
 } finally {
     Close-ScoutMutex $appMutex

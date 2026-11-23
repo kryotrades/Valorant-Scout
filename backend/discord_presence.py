@@ -189,8 +189,8 @@ class _Worker:
 
             score = board.get("score") or {}
             details = f"{mode} // {score.get('ally', 0)} - {score.get('enemy', 0)}"
-            dm = mode in ("Deathmatch", "Team Deathmatch")
-            status = rank_name if dm else                rank_name + (f" · {board['side']}" if board.get("side") else "")
+            side = live_match.current_side(board.get("side"), score.get("round"), mode)
+            status = rank_name + (f" · {side}" if side else "")
 
             comp = mode == "Competitive"
             small = rank_icon if comp else ((self_p or {}).get("agentPortrait") or rank_icon)

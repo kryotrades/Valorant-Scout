@@ -49,6 +49,7 @@ def last_good(puuid: str | None = None) -> dict | None:
 
 
 def _contract_rewards() -> set:
+    valapi._get("contracts")
     if "_contractskins" in valapi._cache:
         return valapi._cache["_contractskins"]
     contracts = valapi._get("contracts")
@@ -67,6 +68,7 @@ def _contract_rewards() -> set:
     return out
 
 def _base_levels() -> dict:
+    valapi._get("weapons")
     if "_baselevels" in valapi._cache:
         return valapi._cache["_baselevels"]
     out = {}

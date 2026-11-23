@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,19 @@ import valapi
 from agents import UUID_TO_NAME, resolve_agent
 from vconstants import (GAMEMODES, party_color, rank_from_tier,
                         map_name_from_path, STATES)
+
+NO_SIDE_MODES = re.compile(r"deathmatch|escalation", re.I)
+
+
+def current_side(side, round_number, mode):
+    if NO_SIDE_MODES.search(mode or ""):
+        return None
+    if not side or not round_number:
+        return side
+    half = 4 if "swift" in (mode or "").lower() else 3 if "spike" in (mode or "").lower() else 12
+    swapped = (round_number - 2 * half) % 2 == 0 if round_number > 2 * half else round_number > half
+    return ({"Attacker": "Defender"}.get(side, "Attacker")) if swapped else side
+
 
 def _mode_label(queue: str) -> str:
     pass
@@ -62,7 +76,7 @@ _KD_CACHE_MAX = 300
 _MIDS_CACHE: dict[str, tuple[list[str], bool, float]] = {}
 _MIDS_TTL = 60.0
 
-_RANK_CACHE: dict[str, tuple[dict, str, float]] = {}
+_RANK_CACHE: dict[str, tuple[dict, tuple[str, str | None, str | None], float]] = {}
 _RR_CACHE: dict[str, tuple] = {}
 
 _MATCH_DETAIL_CACHE: dict[str, dict] = {}
@@ -87,6 +101,23 @@ def _log(msg: str) -> None:
 def _is_throttled(resp) -> bool:
     pass
     return isinstance(resp, dict) and resp.get("status") == 429
+
+NON_ROUND_QUEUES = frozenset({"deathmatch", "hurm", "ggteam"})
+
+
+def _perf_score(player: dict):
+    v = (player.get("scores") or {}).get("TempValueF")
+    return round(v) if isinstance(v, (int, float)) and 0 <= v <= 500 else None
+
+
+def _riot_trades(player: dict, rounds: int):
+    scores = player.get("scores") or {}
+    if _perf_score(player) is None:
+        return None
+    rate = scores.get("TempValueB") or 0
+    played = (player.get("stats") or {}).get("roundsPlayed") or rounds
+    return round(rate * played) if isinstance(rate, (int, float)) and rate >= 0 else None
+
 
 def _fallback_name(puuid: str) -> str:
     pass
@@ -543,10 +574,14 @@ class LiveMatch:
                "prev": 0, "peak_season": season, "ok": False}
         try:
             hit = _RANK_CACHE.get(puuid)
-            if hit:
+            if not season:
+                return hit[0] if hit else out
+
+            acts = (season, prev_season)
+            if hit and hit[1][:2] == acts:
                 mids, is_comp, _ = self._fresh_mids(puuid)
-                rank_key = mids[0] if (mids and is_comp) else "nocomp"
-                if hit[1] is None and time.time() - hit[2] < _MIDS_TTL:
+                rank_key = (*acts, mids[0] if (mids and is_comp) else "nocomp")
+                if hit[1][2] is None and time.time() - hit[2] < _MIDS_TTL:
                     _cache_put(_RANK_CACHE, _KD_CACHE_MAX, puuid, (hit[0], rank_key, hit[2]))
                     return hit[0]
                 if hit[1] == rank_key:
@@ -554,11 +589,9 @@ class LiveMatch:
             else:
                 mhit = _MIDS_CACHE.get(puuid)
                 if mhit and time.time() - mhit[2] < _MIDS_TTL:
-                    rank_key = mhit[0][0] if (mhit[0] and mhit[1]) else "nocomp"
+                    rank_key = (*acts, mhit[0][0] if (mhit[0] and mhit[1]) else "nocomp")
                 else:
-                    rank_key = None
-            if not season:
-                return hit[0] if hit else out
+                    rank_key = (*acts, None)
             if riot_client.held_secs("/mmr/") > 0:
                 return out
             r = self.auth.pd_get(f"/mmr/v1/players/{puuid}")
@@ -567,7 +600,7 @@ class LiveMatch:
             out["ok"] = True
             si = (((r.get("QueueSkills") or {}).get("competitive") or {})
                   .get("SeasonalInfoBySeasonID")) or {}
-            cur = si.get(season, {}) if season else {}
+            cur = si.get(season, {})
             out["tier"] = cur.get("CompetitiveTier", 0) or 0
             out["rr"] = cur.get("RankedRating", 0) or 0
             out["lb"] = cur.get("LeaderboardRank", 0) or 0
@@ -1249,13 +1282,19 @@ class LiveMatch:
         map_name = map_name_from_path(info.get("mapId", ""))
         opponent_score = next((team.get("roundsWon", 0) for tid, team in teams.items()
                                if tid != team_id), None)
+        result = "Draw"
+        if not riot_client.is_competitive_draw(queue, teams):
+            result = "Victory" if won is True else "Defeat" if won is False else "Draw"
+            if won is False and queue.lower() != "competitive" and not any(t.get("won") for t in teams.values()):
+                result = "Draw" if len({t.get("roundsWon", 0) for t in teams.values()}) == 1 else None
         return {
             "matchId": mid or info.get("matchId", ""),
             "map": map_name,
             "mapSplash": valapi.map_splash(map_name),
             "mode": _mode_label(queue),
+            "roundBased": queue.lower() not in NON_ROUND_QUEUES and rounds >= 3,
             "startMillis": info.get("gameStartMillis", 0),
-            "result": "Victory" if won is True else "Defeat" if won is False else "Draw",
+            "result": result,
             "team": team_id,
             "score": mine.get("roundsWon", 0),
             "opponentScore": opponent_score,
@@ -1297,7 +1336,7 @@ class LiveMatch:
         timeline = []
         queue_id = (info.get("queueID") or info.get("queueId") or "").lower()
         round_mode = (len(md.get("roundResults", []) or []) >= 2
-                      and queue_id not in ("deathmatch", "hurm"))
+                      and queue_id not in NON_ROUND_QUEUES)
         for rr in md.get("roundResults", []):
             round_kills = []
             for ps in rr.get("playerStats", []):
@@ -1312,12 +1351,15 @@ class LiveMatch:
                     multi[s] = multi.get(s, 0) + 1
                 if len(kills) >= 5:
                     aces[s] = aces.get(s, 0) + 1
-            if round_kills:
-                first = min(round_kills, key=lambda k: k.get("roundTime", k.get("timeSinceRoundStartMillis", 0)) or 0)
-                if first.get("killer"):
-                    first_k[first["killer"]] = first_k.get(first["killer"], 0) + 1
-                if first.get("victim"):
-                    first_d[first["victim"]] = first_d.get(first["victim"], 0) + 1
+            first = min(
+                round_kills,
+                key=lambda k: k.get("roundTime", k.get("timeSinceRoundStartMillis", 0)) or 0,
+                default={},
+            )
+            if first.get("killer"):
+                first_k[first["killer"]] = first_k.get(first["killer"], 0) + 1
+            if first.get("victim"):
+                first_d[first["victim"]] = first_d.get(first["victim"], 0) + 1
             if rr.get("bombPlanter"):
                 plants[rr["bombPlanter"]] = plants.get(rr["bombPlanter"], 0) + 1
             if rr.get("bombDefuser"):
@@ -1329,6 +1371,11 @@ class LiveMatch:
                     "how": rr.get("roundResult") or rr.get("roundResultCode"),
                     "kills": sum(1 for k in round_kills if k.get("killer") == subject),
                     "died": any(k.get("victim") == subject for k in round_kills),
+                    "firstBlood": first.get("killer") == subject,
+                    "ceremony": (rr.get("roundCeremony") or "").replace("Ceremony", "").replace("Default", "") or None
+                                if rr.get("winningTeam") == subject_team else None,
+                    "plant": rr.get("bombPlanter") == subject,
+                    "defuse": rr.get("bombDefuser") == subject,
                 })
 
         raw = md.get("players", []) or []
@@ -1365,8 +1412,10 @@ class LiveMatch:
                 "kills": k, "deaths": d, "assists": a,
                 "kd": round(k / d, 2) if d else float(k),
                 "acs": round(st.get("score", 0) / rounds) if rounds else 0,
+                "perf": _perf_score(p),
                 "hsPct": round(heads.get(sub, 0) / th * 100) if th else None,
                 "adr": round(dealt.get(sub, 0) / rounds) if (round_mode and dealt) else None,
+                "trades": _riot_trades(p, rounds) if round_mode else None,
                 "firstBloods": first_k.get(sub, 0) if round_mode else None,
                 "firstDeaths": first_d.get(sub, 0) if round_mode else None,
                 "multiKills": multi.get(sub, 0) if round_mode else None,
@@ -1383,7 +1432,7 @@ class LiveMatch:
                                                    p.get("playerCard") or p.get("playerCardId")),
                 "isSubject": sub == subject,
             })
-        players.sort(key=lambda x: -x["acs"])
+        players.sort(key=lambda x: (-(x["perf"] if x["perf"] is not None else -1), -x["acs"]))
 
         won = None
         if subject:
@@ -1394,9 +1443,12 @@ class LiveMatch:
             round_scores = {t.get("roundsWon", 0) for t in teams.values()}
             won = "draw" if len(round_scores) == 1 else None
         subject_team = next((p.get("team") for p in players if p.get("isSubject")), None)
-        if players:
-            players[0]["isMatchMvp"] = True
-        team_mvp = next((p for p in players if p.get("team") == subject_team), None)
+        by_id = {p["puuid"]: p for p in players}
+        match_mvp = by_id.get(md.get("matchMvp")) or (players[0] if players else None)
+        if match_mvp:
+            match_mvp["isMatchMvp"] = True
+        team_mvp = (by_id.get((teams.get(subject_team) or {}).get("mvp"))
+                    or next((p for p in players if p.get("team") == subject_team), None))
         if team_mvp:
             team_mvp["isTeamMvp"] = True
         team_stats = {}
@@ -1425,10 +1477,11 @@ def _career_summary(matches: list) -> dict:
     pass
     n = len(matches)
     if not n:
-        return {"averages": {"games": 0, "wins": 0, "winRate": 0, "kd": 0,
+        return {"averages": {"games": 0, "wins": 0, "losses": 0, "draws": 0, "winRate": 0, "kd": 0,
                              "kills": 0, "deaths": 0, "assists": 0, "hsPct": 0},
                 "coPlayers": [], "agentPool": [], "mapStats": []}
     wins = sum(1 for m in matches if m["result"] == "Victory")
+    losses = sum(1 for m in matches if m["result"] == "Defeat")
     k = sum(m["kills"] for m in matches)
     d = sum(m["deaths"] for m in matches)
     a = sum(m["assists"] for m in matches)
@@ -1458,26 +1511,31 @@ def _career_summary(matches: list) -> dict:
             name = m.get(key)
             if not name or name == "Unknown":
                 continue
-            t = out.setdefault(name, [0, 0])
-            t[1] += 1
+            t = out.setdefault(name, [0, 0, 0])
+            t[2] += 1
             if m["result"] == "Victory":
                 t[0] += 1
+            elif m["result"] == "Defeat":
+                t[1] += 1
         return out
 
+    def _rate(w, l):
+        return round(100 * w / (w + l)) if w + l else 0
+
     agent_pool = [
-        {"agent": ag, "games": g, "winRate": round(100 * w / g),
+        {"agent": ag, "games": g, "wins": w, "losses": l, "draws": g - w - l, "winRate": _rate(w, l),
          "portrait": (resolve_agent(ag) or {}).get("portrait"),
          "color": (resolve_agent(ag) or {}).get("color", "#8B978F")}
-        for ag, (w, g) in sorted(_tally("agent").items(), key=lambda x: -x[1][1])
+        for ag, (w, l, g) in sorted(_tally("agent").items(), key=lambda x: -x[1][2])
     ][:5]
     map_stats = [
-        {"map": mp, "games": g, "wins": w, "winRate": round(100 * w / g)}
-        for mp, (w, g) in sorted(_tally("map").items(), key=lambda x: -x[1][1])
+        {"map": mp, "games": g, "wins": w, "losses": l, "draws": g - w - l, "winRate": _rate(w, l)}
+        for mp, (w, l, g) in sorted(_tally("map").items(), key=lambda x: -x[1][2])
     ]
 
     return {
         "averages": {
-            "games": n, "wins": wins, "winRate": round(100 * wins / n),
+            "games": n, "wins": wins, "losses": losses, "draws": n - wins - losses, "winRate": _rate(wins, losses),
             "kills": round(k / n, 1), "deaths": round(d / n, 1), "assists": round(a / n, 1),
             "kd": round(k / d, 2) if d else float(k),
             "hsPct": round(sum(hs) / len(hs)) if hs else None,

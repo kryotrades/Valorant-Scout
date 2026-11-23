@@ -18,8 +18,13 @@ def _load() -> dict:
             raw = json.load(fh)
         if isinstance(raw, dict) and raw.get("version") == 1 and isinstance(raw.get("accounts"), dict):
             return raw
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception:
+        try:
+            os.replace(_PATH, f"{_PATH}.unreadable-{int(time.time())}")
+        except OSError:
+            pass
     return {"version": 1, "accounts": {}}
 
 
@@ -30,6 +35,8 @@ def _save() -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(_STORE, fh, ensure_ascii=False, separators=(",", ":"))
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, _PATH)
         finally:
             if os.path.exists(tmp):
@@ -77,3 +84,9 @@ def update(puuid: str | None, match_id: str, payload: object) -> dict:
             account.pop(match_id, None)
         _save()
     return {"ok": True, "matchId": match_id, "meta": meta}
+
+
+def forget(puuid: str) -> None:
+    with _LOCK:
+        if _STORE.get("accounts", {}).pop(str(puuid), None) is not None:
+            _save()

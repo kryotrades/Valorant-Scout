@@ -18,23 +18,33 @@ WEAPON_UUIDS = {
 _cache: dict = {}
 _failed_at: dict = {}
 _RETRY_SECS = 60.0
+_fetched_at: dict = {}
+_REFRESH_SECS = 6 * 3600.0
+_STALE_RETRY_SECS = 300.0
 
 def _get(path: str):
+    now = time.time()
     if path in _cache:
-        return _cache[path]
-    if time.time() - _failed_at.get(path, 0.0) < _RETRY_SECS:
+        if now - _fetched_at.setdefault(path, now) < _REFRESH_SECS or now - _failed_at.get(path, 0.0) < _STALE_RETRY_SECS:
+            return _cache[path]
+    elif now - _failed_at.get(path, 0.0) < _RETRY_SECS:
         return None
     try:
         data = requests.get(f"{BASE}/{path}", timeout=10).json().get("data")
     except Exception:
         data = None
     if data:
+        if path in _cache and _cache[path] != data:
+            for k in [k for k in _cache if k.startswith("_")]:
+                _cache.pop(k, None)
         _cache[path] = data
-    else:
-        _failed_at[path] = time.time()
-    return data
+        _fetched_at[path] = now
+        return data
+    _failed_at[path] = now
+    return _cache.get(path)
 
 def _skins_map() -> dict:
+    _get("weapons/skins")
     if "_skins" in _cache:
         return _cache["_skins"]
     out = {}
@@ -65,6 +75,7 @@ WEAPON_ORDER = [
 
 def _weapons_map() -> dict:
     pass
+    _get("weapons")
     if "_weapons" in _cache:
         return _cache["_weapons"]
     out = {}
@@ -91,6 +102,7 @@ def weapon_icon(uuid: str):
 
 def skins_for_weapon(weapon: str) -> list:
     pass
+    _skins_map()
     key = "_skinsfor_" + weapon.lower()
     if key in _cache:
         return _cache[key]
@@ -126,6 +138,7 @@ def loadout_weapons(items: dict) -> list:
     return out
 
 def _tiers_map() -> dict:
+    _get("competitivetiers")
     if "_tiers" in _cache:
         return _cache["_tiers"]
     out = {}
@@ -147,6 +160,7 @@ def cached_rank_icon(tier: int):
     return (tiers.get(int(tier or 0)) or {}).get("icon")
 
 def _titles_map() -> dict:
+    _get("playertitles")
     if "_titles" in _cache:
         return _cache["_titles"]
     out = {t["uuid"].lower(): (t.get("titleText") or "")
@@ -166,6 +180,7 @@ def player_card(card_id: str, kind: str = "wide"):
     return f"https://media.valorant-api.com/playercards/{card_id}/{kind}art.png"
 
 def _maps_map() -> dict:
+    _get("maps")
     if "_maps" in _cache:
         return _cache["_maps"]
     out = {}
@@ -212,6 +227,7 @@ def _episode_label(name: str):
 
 def _season_labels() -> dict:
     pass
+    _get("seasons")
     if "_seasonlabels" in _cache:
         return _cache["_seasonlabels"]
     data = _get("seasons") or []

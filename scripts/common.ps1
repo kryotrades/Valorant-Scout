@@ -14,11 +14,37 @@ $HasFrontend = Test-Path (Join-Path $Root "frontend\package.json")
 
 $MarkerSchemaVersion = 2
 
-function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
-function Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
-function Note($m) { Write-Host "  . $m" -ForegroundColor DarkGray }
-function Warn2($m){ Write-Host "  ! $m" -ForegroundColor Yellow }
-function Fail($m) { Write-Host "  x $m" -ForegroundColor Red }
+function Step($m) { Write-Host ""; Write-Host "  $m" -ForegroundColor Cyan }
+function Ok($m)   { Write-Host "    OK   $m" -ForegroundColor Green }
+function Note($m) { Write-Host "         $m" -ForegroundColor DarkGray }
+function Warn2($m){ Write-Host "    !    $m" -ForegroundColor Yellow }
+function Fail($m) { Write-Host "    X    $m" -ForegroundColor Red }
+
+
+function Show-Banner([string]$what) {
+    $line = "  " + ("=" * 58)
+    Write-Host ""
+    Write-Host $line -ForegroundColor DarkGray
+    Write-Host "   VALORANT " -ForegroundColor Red -NoNewline
+    Write-Host "SCOUT" -ForegroundColor White -NoNewline
+    Write-Host ($(if ($what) { "   $what" } else { "" }) + "   v$(Get-LocalVersion)") -ForegroundColor DarkGray
+    Write-Host $line -ForegroundColor DarkGray
+}
+
+
+$StageN = 0
+$StageTotal = 0
+function Stage($m) { $script:StageN++; Write-Host ""; Write-Host "  [$script:StageN/$script:StageTotal] $m" -ForegroundColor White }
+
+
+function Show-Progress([string]$m) {
+    if ([Console]::IsOutputRedirected) { return }
+    Write-Host ("`r         " + $m).PadRight(78).Substring(0, 78) -NoNewline -ForegroundColor DarkGray
+}
+function Clear-Progress {
+    if ([Console]::IsOutputRedirected) { return }
+    Write-Host ("`r" + (" " * 78) + "`r") -NoNewline
+}
 
 function Has-Cmd($name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 
@@ -245,14 +271,10 @@ function Stop-RunningApp([string]$LogName = "launcher") {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & taskkill /PID $appPid /T 2>&1 | Out-Null
-        $deadline = (Get-Date).AddSeconds(3)
-        while ((Get-Date) -lt $deadline -and (Get-CimInstance Win32_Process -Filter "ProcessId=$appPid" -ErrorAction SilentlyContinue)) {
-            Start-Sleep -Milliseconds 200
-        }
-        if (Get-CimInstance Win32_Process -Filter "ProcessId=$appPid" -ErrorAction SilentlyContinue) {
-            & taskkill /PID $appPid /T /F 2>&1 | Out-Null
-        }
+
+
+
+        & taskkill /PID $appPid /T /F 2>&1 | Out-Null
     } finally { $ErrorActionPreference = $prevEap }
 
 
@@ -264,6 +286,42 @@ function Stop-RunningApp([string]$LogName = "launcher") {
     Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
     Ok "Closed the running app — continuing."
     return $true
+}
+
+
+
+
+function Stop-ValorantWatcher {
+    $needle = (Join-Path $Root "scripts\valorant_watch.py").ToLowerInvariant()
+    Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($needle) } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+
+
+
+function Get-WriteError([string]$dir) {
+    try {
+        [void][System.IO.Directory]::CreateDirectory($dir)
+        $t = [System.IO.Path]::Combine($dir, ".vs-write-test-" + [Guid]::NewGuid().ToString("N"))
+        [System.IO.File]::WriteAllText($t, "x")
+        try { [System.IO.File]::Delete($t) } catch { }
+        return $null
+    } catch { return $_.Exception.Message }
+}
+
+
+
+
+function Use-WritableTemp([string]$Log) {
+    $err = Get-WriteError $env:TEMP
+    if (-not $err) { return }
+    $own = Join-Path $ScoutDir "tmp"
+    if (Get-WriteError $own) { return }
+    Write-ScoutLog -Log $Log -Level WARN -Message "TEMP '$($env:TEMP)' unusable ($err); using $own"
+    $env:TEMP = $own
+    $env:TMP = $own
 }
 
 
@@ -290,13 +348,31 @@ function Test-Preflight {
         $problems += "The folder name contains square brackets [ ]: '$Root'. Rename the folder to remove them (e.g. 'valorant-scout [1]' -> 'valorant-scout'), then run install.bat again."
     }
 
-    foreach ($dir in @($Root, $env:TEMP)) {
-        try {
-            $t = Join-Path $dir (".vs-write-test-" + [Guid]::NewGuid().ToString("N"))
-            [System.IO.File]::WriteAllText($t, "x")
-            Remove-Item $t -Force
-        } catch {
-            $problems += "The folder '$dir' is not writable. Move Valorant Scout to a folder you can write to (e.g. Documents)."
+
+
+
+    try {
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+        if (([Security.Principal.WindowsPrincipal]$me).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            $session = (Get-Process -Id $PID).SessionId
+            $owners = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe' AND SessionId=$session" -ErrorAction Stop |
+                ForEach-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop).Sid } | Where-Object { $_ })
+            if ($owners.Count -gt 0 -and $owners -notcontains $me.User.Value) {
+                $problems += "Setup is running as administrator under a different account ($($me.Name)) than the one signed in to Windows. Close this window and double-click install.bat as yourself - it does not need 'Run as administrator'."
+            }
+        }
+    } catch { }
+
+    $err = Get-WriteError $Root
+    if ($err) {
+        Write-ScoutLog -Log install -Level WARN -Message "app folder not writable: $err"
+        $problems += "The folder '$Root' is not writable. Move Valorant Scout to a folder you can write to (e.g. Documents)."
+    } else {
+        Use-WritableTemp install
+        $err = Get-WriteError $env:TEMP
+        if ($err) {
+            Write-ScoutLog -Log install -Level WARN -Message "TEMP not writable: $err"
+            $problems += "Windows' temp folder '$($env:TEMP)' can't be written to. Antivirus or a cleanup tool may be blocking it - allow it, restart the PC, then run install.bat again."
         }
     }
 
@@ -392,7 +468,7 @@ function Install-ExactPython {
     Step "Installing Python $($mf.python.version) (64-bit, from python.org) ..."
     $tmp = Join-Path $env:TEMP ("vs-python-" + [Guid]::NewGuid().ToString("N") + ".exe")
     try {
-        Note "Downloading $($mf.python.installerUrl)"
+        Note "Downloading it from python.org (about 25 MB) ..."
         Invoke-WebRequest -Uri $mf.python.installerUrl -OutFile $tmp -TimeoutSec 600
         $hash = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash
         if ($hash -ne $mf.python.installerSha256.ToUpper()) {
@@ -402,7 +478,8 @@ function Install-ExactPython {
         if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -ne $mf.python.installerSubject) {
             throw "Python installer signature check failed (status: $($sig.Status)). Refusing to run it."
         }
-        Ok "Installer verified (SHA-256 + Authenticode)."
+        Ok "Download verified (checksum and python.org signature)."
+        Note "Installing it for your user account only ..."
         $p = Start-Process -FilePath $tmp -Wait -PassThru -ArgumentList `
             "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_launcher=1"
         if ($p.ExitCode -ne 0) { throw "Python installer failed (exit code $($p.ExitCode))." }
@@ -581,6 +658,13 @@ function Repair-Venv($py) {
         if ($busy.Count -gt 0) {
             throw "Couldn't rebuild .venv: $($busy[0].Name) (PID $($busy[0].ProcessId)) is still running from it. Close VALORANT if it is open (Valorant Scout's offline-chat helper runs until VALORANT exits), then run install.bat again."
         }
+    }
+
+
+
+
+    if (-not (Test-Path $UpdateStateFile)) { foreach ($m in @("installed.json", "deps.json")) { [System.IO.File]::Delete((Join-Path $ScoutDir $m)) } }
+    if (Test-Path $resolved) {
         Step "Rebuilding the Python environment (.venv) ..."
         try {
             Remove-Item -Recurse -Force $resolved
@@ -594,26 +678,42 @@ function Repair-Venv($py) {
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VenvPy)) { throw "Failed to create .venv (exit code $LASTEXITCODE)." }
 }
 
+
+
+
+function Get-VenvBusyProcess {
+    $venvPrefix = (Assert-IsRepoVenv $VenvDir).TrimEnd('\').ToLowerInvariant() + '\'
+    return Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($venvPrefix) } | Select-Object -First 1
+}
+
 function Install-PyDeps {
     $mf = Get-RuntimeManifest
-    Step "Installing Python packages (pinned) ..."
-    & $VenvPy -m pip install --quiet --no-warn-script-location "pip==$($mf.pip.version)"
-    if ($LASTEXITCODE -ne 0) { throw "Couldn't install the pinned pip $($mf.pip.version) (check your internet connection)." }
+    Step "Installing Scout's Python packages ..."
+    Note "This is the slow part - usually a minute or two."
+    & $VenvPy -m pip install --quiet --disable-pip-version-check --no-warn-script-location "pip==$($mf.pip.version)"
+    if ($LASTEXITCODE -ne 0) { throw "Couldn't install the pinned pip $($mf.pip.version): pip install failed - see the error above (often internet, antivirus, or a very long folder path)." }
     $req = Join-Path $Root "backend\requirements.txt"
     $done = $false
     for ($i = 1; $i -le 3; $i++) {
         if ($i -gt 1) { Warn2 "pip install hiccup - retrying ($i/3) ..."; Start-Sleep -Seconds 3 }
-        & $VenvPy -m pip install -r $req
+
+        $n = 0
+        & $VenvPy -m pip install --disable-pip-version-check --no-warn-script-location -r $req | ForEach-Object {
+            if ("$_" -match '^Collecting ([A-Za-z0-9_.\-]+)') { $n++; Show-Progress "Package $n - $($Matches[1])" }
+            elseif ("$_" -match '^Installing collected packages') { Show-Progress "Unpacking $n packages ..." }
+        }
+        Clear-Progress
         if ($LASTEXITCODE -eq 0) { $done = $true; break }
     }
-    if (-not $done) { throw "VS-DEPS-001 pip install failed (check your internet connection, then run install.bat again)." }
+    if (-not $done) { throw "VS-DEPS-001 pip install failed - see the error above (often internet, antivirus, or a very long folder path)." }
 
-    & $VenvPy -m pip check
+    & $VenvPy -m pip check | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "VS-DEPS-001 pip check failed after install — the dependency set is inconsistent." }
     & $VenvPy (Join-Path $PSScriptRoot "verify_installed.py") `
-        --requirements (Join-Path $Root "backend\requirements.txt")
+        --requirements (Join-Path $Root "backend\requirements.txt") | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "VS-DEPS-001 installed package versions do not exactly match requirements.txt." }
-    & $VenvPy (Join-Path $PSScriptRoot "import_smoke.py")
+    & $VenvPy (Join-Path $PSScriptRoot "import_smoke.py") | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "VS-DEPS-001 import smoke test failed after install." }
     Ok "Python packages installed and verified."
 }
@@ -788,15 +888,21 @@ function Resolve-RepoPath([string]$rel) {
 
 function Restore-FromBackup($state) {
     Step "Rolling back the interrupted/failed update ..."
+
+
+    Stop-ValorantWatcher
     $backup = $state.backupDir
     if (-not $backup -or -not (Test-Path $backup)) {
         throw "update rollback backup is missing; refusing to guess at the previous tree. Re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat."
     }
-    Get-ChildItem -Path $backup -Recurse -File | ForEach-Object {
-        $rel = $_.FullName.Substring($backup.Length).TrimStart('\')
+
+
+
+    Get-ChildItem -Path $backup -Recurse -File -Name | ForEach-Object {
+        $rel = [string]$_
         $dst = Resolve-RepoPath $rel
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
-        Copy-Item -Force $_.FullName $dst
+        Copy-Item -Force (Join-Path $backup $rel) $dst
     }
     foreach ($rel in @($state.addedFiles)) {
         if (-not $rel) { continue }

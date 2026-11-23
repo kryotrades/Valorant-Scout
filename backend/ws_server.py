@@ -238,7 +238,26 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
                                                  "id": rid, "ok": False,
                                                  "error": str(e)})
 
+            async def run_command(cmd, payload, cid, prev):
+                if prev is not None:
+                    await asyncio.wait({prev})
+                try:
+                    result = await loop.run_in_executor(
+                        None, lambda: command_router.execute(
+                            client_id=client_id, command=cmd, payload=payload,
+                            command_id=cid))
+                except Exception as e:
+                    result = {"ok": False, "message": f"Command failed: {e}"}
+                ack = {"type": "command_ack", "id": cid,
+                       "ok": bool(result.get("ok")),
+                       "message": result.get("message", "")}
+                for k in ACK_FIELDS:
+                    if k in result:
+                        ack[k] = result[k]
+                await _safe_send(websocket, ack)
+
             pending: set = set()
+            last_cmd: dict = {}
             try:
                 async for raw in websocket:
                     m = _parse(raw)
@@ -255,21 +274,13 @@ def start(*, board_provider, command_router, frontend_url: str, ws_port: int,
                         task.add_done_callback(pending.discard)
                         continue
                     if mtype == "command":
-                        cmd = m.get("command")
-                        payload = m.get("payload") or {}
-                        cid = m.get("id")
-                        result = await loop.run_in_executor(
-                            None,
-                            lambda c=cmd, p=payload, i=cid: command_router.execute(
-                                client_id=client_id, command=c, payload=p,
-                                command_id=i))
-                        ack = {"type": "command_ack", "id": cid,
-                               "ok": bool(result.get("ok")),
-                               "message": result.get("message", "")}
-                        for k in ACK_FIELDS:
-                            if k in result:
-                                ack[k] = result[k]
-                        await _safe_send(websocket, ack)
+                        key = str(m.get("command"))
+                        task = asyncio.ensure_future(run_command(
+                            m.get("command"), m.get("payload") or {}, m.get("id"),
+                            last_cmd.get(key)))
+                        last_cmd[key] = task
+                        pending.add(task)
+                        task.add_done_callback(pending.discard)
             except ConnectionClosed:
                 pass
             finally:

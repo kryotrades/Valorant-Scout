@@ -13,7 +13,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.path.abspath(__file__)).parent
 BACKEND = ROOT / "backend"
 FRONTEND = ROOT / "frontend"
 SCOUT_DIR = ROOT / ".scout"
@@ -99,7 +99,7 @@ def _fatal_dialog(message: str) -> None:
         ctypes.windll.user32.MessageBoxW(
             None,
             f"{message}\n\nDetails: {SCOUT_DIR / 'launcher.log'}",
-            "Valorant Scout", 0x10)
+            "Valorant Scout", 0x10 | 0x40000 | 0x10000)
     except Exception:
         pass
 
@@ -123,6 +123,9 @@ def _env_value(val: str) -> str:
     return re.split(r"\s+#", val, maxsplit=1)[0].strip('"').strip("'")
 
 def venv_python() -> Path:
+    bundled = ROOT / "runtime" / "python.exe"
+    if IS_WIN and bundled.exists():
+        return bundled
     return ROOT / ".venv" / ("Scripts/python.exe" if IS_WIN else "bin/python")
 
 def resolve_python() -> str:
@@ -654,6 +657,7 @@ def main():
         child_env["FRONTEND_PORT"] = str(frontend_port)
         child_env["PORT"] = str(frontend_port)
         child_env["FRONTEND_URL"] = frontend_url
+        child_env["PYTHONIOENCODING"] = "utf-8"
 
         LOG.info("starting stack: backend=%s ws=%s frontend=%s (%s)",
                  backend_port, ws_port, frontend_port,
@@ -724,6 +728,10 @@ def main():
                 if p.poll() is None:
                     continue
                 role = roles.get(p, "child")
+                if role == "backend" and p.returncode == 64:
+                    LOG.info("quit from the dashboard; shutting down")
+                    stop = True
+                    break
                 if role == "backend":
                     if _CLOSING or (ATTACHED and p.returncode in (0xC000013A, -1073741510)):
                         LOG.info("backend exited with console-close status; shutting down")
@@ -782,7 +790,7 @@ def _report_crash():
                 None,
                 f"Valorant Scout couldn't start.\n\n{last}\n\n"
                 f"Details were saved to:\n{log}",
-                "Valorant Scout", 0x10)
+                "Valorant Scout", 0x10 | 0x40000 | 0x10000)
         except Exception:
             pass
 

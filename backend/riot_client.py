@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 
 import requests
@@ -38,6 +39,16 @@ _QUEUE_NAMES = {
     "spikerush": "Spike Rush", "deathmatch": "Deathmatch", "ggteam": "Escalation",
     "hurm": "Team Deathmatch", "": "Custom",
 }
+
+
+def is_competitive_draw(queue: str, teams: dict) -> bool:
+    if queue.lower() != "competitive" or len(teams) != 2:
+        return False
+    scores = {team.get("roundsWon", team.get("numPoints")) for team in teams.values()}
+    return len(scores) == 1 and None not in scores and not any(
+        team.get("won") for team in teams.values()
+    )
+
 
 def _log(msg: str) -> None:
     if os.getenv("SCOUT_QUIET"):
@@ -189,7 +200,7 @@ class LocalAuth:
                 f"https://127.0.0.1:{self.lockfile['port']}/chat/v4/presences",
                 headers=local, verify=False, timeout=5).json()
             for pr in (data or {}).get("presences", []) or []:
-                if pr.get("product") != "valorant" or not pr.get("private"):
+                if pr.get("product") != "valorant" or not pr.get("private") or pr.get("puuid") != self.puuid:
                     continue
                 try:
                     priv = json.loads(base64.b64decode(str(pr["private"])).decode("utf-8"))
@@ -446,8 +457,10 @@ def party_snapshot(auth: LocalAuth) -> dict:
         if party.get("State"):
             snap["state"] = party["State"]
             snap["inQueue"] = "MATCHMAKING" in party["State"]
-        snap["eligible"] = [{"id": q, "name": _label(q)}
-                            for q in (party.get("EligibleQueues") or [])]
+        ids = [q.lower() for q in (party.get("EligibleQueues") or [])]
+        if len(members) == 4 and ids and "competitive" not in ids:
+            ids.insert(ids.index("unrated") + 1 if "unrated" in ids else 0, "competitive")
+        snap["eligible"] = [{"id": q, "name": _label(q)} for q in ids]
         snap["queuedAt"] = _iso_to_epoch(party.get("QueueEntryTime"))
         snap["partySize"] = len(members)
         if "IsOwner" in mine:
@@ -657,7 +670,10 @@ class RiotClient:
         rw = my_team.get("roundsWon", my_team.get("numPoints", 0))
         other = [t for tid, t in teams.items() if tid != team_id]
         rl = other[0].get("roundsWon", other[0].get("numPoints", 0)) if other else 0
-        if won is True:
+        queue = (info.get("queueId") or info.get("queueID") or "").lower()
+        if is_competitive_draw(queue, teams):
+            result = "Draw"
+        elif won is True:
             result = "Victory"
         elif won is False:
             result = "Defeat"
@@ -677,7 +693,6 @@ class RiotClient:
                 "agent": UUID_TO_NAME.get((p.get("characterId") or "").lower(), "Unknown"),
             })
 
-        queue = (info.get("queueId") or info.get("queueID") or "").lower()
         start_ms = info.get("gameStartMillis") or info.get("gameStartTimeMillis") or 0
         date = (datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat()
                 if start_ms else datetime.now(timezone.utc).isoformat())
@@ -819,8 +834,12 @@ class RiotClient:
             if elig and qid not in elig:
                 return {"ok": False,
                         "message": f"{label} isn't selectable right now."}
-            r = auth.glz_post(f"/parties/v1/parties/{snap['partyId']}/queue",
-                              json={"queueID": qid})
+            pid = snap["partyId"]
+            if "CUSTOM" in str(snap.get("state") or "").upper():
+                r = auth.glz_post(f"/parties/v1/parties/{pid}/converttodefault"
+                                  f"?queueID={urllib.parse.quote(qid, safe='')}")
+            else:
+                r = auth.glz_post(f"/parties/v1/parties/{pid}/queue", json={"queueID": qid})
             if r.status_code >= 400:
                 return {"ok": False,
                         "message": f"Riot refused the change (HTTP {r.status_code})."}
@@ -852,6 +871,8 @@ class RiotClient:
                 return {"ok": False, "message": "Only the party owner can start the queue."}
             if not snap.get("allReady"):
                 return {"ok": False, "message": "Not everyone in the party is ready."}
+            if snap.get("queueId") == "competitive" and snap.get("partySize") == 4:
+                return {"ok": False, "message": "Competitive needs 1–3 or 5 players to queue."}
             r = auth.glz_post(f"/parties/v1/parties/{snap['partyId']}/matchmaking/join")
             if r.status_code >= 400:
                 return {"ok": False,

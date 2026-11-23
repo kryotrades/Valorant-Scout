@@ -27,6 +27,7 @@ GAMEMODES = {
     "hurm": "Team Deathmatch",
     "fortcollins": "Retake",
     "skirmish2v2": "Skirmish 2v2",
+    "abilitydraftarena": "Gauntlet: Glitched",
     "custom": "Custom",
 }
 

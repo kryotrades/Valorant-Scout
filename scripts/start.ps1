@@ -14,19 +14,18 @@ function Show-Phase([int]$step, [string]$text) {
     $width = 22
     $filled = [int][Math]::Round($width * ($step / $Script:PhaseTotal))
     if ($filled -gt $width) { $filled = $width }
-    $bar = ("$([char]0x2588)" * $filled) + ("$([char]0x2591)" * ($width - $filled))
-    $line = "  [$bar]  $text"
 
-    Write-Host ("`r" + $line.PadRight(70)) -NoNewline -ForegroundColor Gray
+
+    Write-Host ("`r   " + ("$([char]0x2588)" * $filled)) -NoNewline -ForegroundColor Red
+    Write-Host ("$([char]0x2591)" * ($width - $filled)) -NoNewline -ForegroundColor DarkGray
+    Write-Host ("  $step/$Script:PhaseTotal  $text").PadRight(46) -NoNewline -ForegroundColor Gray
 }
 function Finish-Progress([string]$text) {
     Show-Phase $Script:PhaseTotal $text
     Write-Host ""
 }
 
-Write-Host ""
-Write-Host "  VALORANT " -ForegroundColor Red -NoNewline
-Write-Host "SCOUT" -ForegroundColor White
+Show-Banner ""
 Write-Host ""
 
 Write-ScoutLog -Log launcher -Message "startup requested (v$(Get-LocalVersion))"
@@ -82,21 +81,20 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
     try {
         $tag = Test-UpdateAvailable
         if ($tag) {
-            Write-Host ""
-            Write-Host ""
-            Write-Host "  A new version ($tag) is available - updating now." -ForegroundColor Cyan
-            Write-Host "  This takes a minute; your settings and match data are kept." -ForegroundColor DarkGray
-            Write-Host ""
+            Finish-Progress "A new version is out - updating first."
             Write-ScoutLog -Log launcher -Message "update $tag available - applying before launch"
+            $env:VS_FROM_LAUNCHER = "1"
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "update.ps1")
+            $env:VS_FROM_LAUNCHER = $null
             if ($LASTEXITCODE -eq 0) {
                 Write-ScoutLog -Log launcher -Message "auto-update finished - now on v$(Get-LocalVersion)"
-                Write-Host "  Updated to v$(Get-LocalVersion)." -ForegroundColor Green
                 Write-Host ""
             } else {
 
 
-                if (Test-Path $UpdateStateFile) {
+
+
+                if ($LASTEXITCODE -ne 2 -and (Test-Path $UpdateStateFile)) {
                     Write-Host ""
                     Write-ScoutLog -Log launcher -Level ERROR -Code VS-UPDATE-001 -Message "startup blocked: auto-update to $tag failed and its rollback did not finish"
                     Show-FatalDialog "Valorant Scout can't start: the update to $tag failed and couldn't be rolled back automatically.`n`nClose VALORANT if it is open and start Valorant Scout again to retry the rollback. If that keeps failing, re-extract the last release over this folder, delete .scout\update-state.json, then run install.bat." "update"
@@ -105,7 +103,7 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
 
                 $env:VS_UPDATE_AVAILABLE = $tag
                 Write-ScoutLog -Log launcher -Level WARN -Message "auto-update to $tag failed (rc=$LASTEXITCODE); launching current version"
-                Write-Host "  Couldn't install the update - starting your current version." -ForegroundColor Yellow
+                Warn2 "Couldn't install the update - starting your current version instead."
                 Write-Host ""
             }
         }
@@ -116,7 +114,7 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
 
 
 Show-Phase 3 "Starting Valorant Scout..."
-Stop-RunningApp "launcher" | Out-Null
+$tookOver = Stop-RunningApp "launcher"
 
 
 
@@ -125,9 +123,23 @@ Stop-RunningApp "launcher" | Out-Null
 
 
 
-Finish-Progress "Opening the scoreboard..."
 $env:VS_PREVALIDATED = "1"
 $env:VS_ATTACHED_CLI = "1"
+
+
+
+
+
+
+if (-not $tookOver -and (Test-Path (Join-Path $ScoutDir "hide-window"))) {
+    Finish-Progress "Running in the background - opening the dashboard..."
+    Write-ScoutLog -Log launcher -Message "starting run.py windowless (background mode)"
+    Start-Process -FilePath $VenvPy -WorkingDirectory $Root -WindowStyle Hidden `
+        -ArgumentList @(('"' + (Join-Path $Root "run.py") + '"'), "--prod", "--no-cli")
+    Start-Sleep -Seconds 2
+    exit 0
+}
+Finish-Progress "Opening the scoreboard..."
 Write-ScoutLog -Log launcher -Message "handing this console to run.py (attached single-window mode)"
 & $VenvPy (Join-Path $Root "run.py") --prod
 $code = $LASTEXITCODE

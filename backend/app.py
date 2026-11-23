@@ -60,6 +60,7 @@ instalock_worker = InstalockWorker()
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = float(os.getenv("PLAYER_CACHE_TTL", "60"))
+_CACHE_MAX = 200
 _ENCOUNTER_BACKFILL_AT: dict[str, float] = {}
 _ENCOUNTER_BACKFILL_LOCK = threading.Lock()
 _ENCOUNTER_JOBS: set[str] = set()
@@ -560,9 +561,10 @@ def _inventory_payload(demo: bool = False) -> dict:
             "retryable": client.source_pref != "demo",
             "error": "Live client not available.",
         }
-    auth = LocalAuth()
+    auth = None
     owner = None
     try:
+        auth = LocalAuth()
         data = inventory.snapshot(auth)
         owner = getattr(auth, "puuid", None)
         return data
@@ -590,6 +592,11 @@ def inventory_route():
 def encounter(puuid: str):
     pass
     return jsonify(encounter_log.get_one(_current_puuid(), puuid.strip()))
+
+
+@app.delete("/api/performance/accounts/<puuid>")
+def forget_account(puuid: str):
+    return jsonify(session_tracker.forget_account(puuid.strip(), _current_puuid()))
 
 
 @app.put("/api/matches/<match_id>/meta")
@@ -656,27 +663,34 @@ def profile(puuid: str):
     if not puuid:
         return jsonify({"error": "puuid required"}), 400
 
+    data = _profile_payload(puuid, request.args.get("demo") == "1")
+    return jsonify(data), (502 if data.get("error") else 200)
+
+
+def _profile_payload(puuid: str, demo: bool = False) -> dict:
     now = time.time()
-    cached = _CACHE.get(f"profile:{puuid}")
+    key = f"profile:{_current_puuid()}:{puuid}:{client.source_pref}:{int(demo)}"
+    cached = _CACHE.get(key)
     if cached and now - cached[0] < _CACHE_TTL:
-        return jsonify(cached[1])
+        return cached[1]
 
     data = None
     if _live_enabled():
         try:
             data = live_match.LiveMatch(LocalAuth()).player_career(puuid)
-            if not data.get("matches"):
+            if data.get("error") or not data.get("matches"):
                 data = None
         except Exception:
             app.logger.exception("live profile failed")
             data = None
     if data is None:
-        if not _sample_ok(puuid, request.args.get("demo") == "1"):
-            return jsonify({"error": "Couldn't load this player's match history from Riot."}), 502
+        if not _sample_ok(puuid, demo):
+            return {"error": "Couldn't load this player's match history from Riot."}
         data = _remember_sample(sample_match.career(puuid))
 
-    _CACHE[f"profile:{puuid}"] = (now, data)
-    return jsonify(data)
+    if data.get("matches") and not data.get("error"):
+        live_match._cache_put(_CACHE, _CACHE_MAX, key, (now, data))
+    return data
 
 @app.get("/api/player/<puuid>")
 def player(puuid: str):
@@ -695,7 +709,7 @@ def player(puuid: str):
         app.logger.exception("player payload failed")
         return jsonify({"error": f"Failed to build player profile: {e}"}), 500
 
-    _CACHE[puuid] = (now, payload)
+    live_match._cache_put(_CACHE, _CACHE_MAX, puuid, (now, payload))
     return jsonify(payload)
 
 @app.get("/api/region")
@@ -736,6 +750,15 @@ def offline_toggle():
         result = offline_launch.set_status(str(body["status"]))
     else:
         result = offline_launch.set_enabled(bool(body.get("enabled", True)))
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+@app.route("/api/autolaunch", methods=["GET", "POST"])
+def autolaunch_route():
+    import autolaunch
+    if request.method == "GET":
+        return jsonify(autolaunch.status())
+    body = request.get_json(silent=True) or {}
+    result = autolaunch.apply(body)
     return jsonify(result), (200 if result.get("ok") else 400)
 
 @app.get("/api/queue")
@@ -839,18 +862,9 @@ def handle_data_request(req_type: str, params: dict | None) -> dict:
             puuid = (params.get("puuid") or "").strip()
             if not puuid:
                 return {"error": "puuid required"}
-            data = None
-            if _live_enabled():
-                try:
-                    d = live_match.LiveMatch(LocalAuth()).player_career(puuid)
-                    if d.get("matches"):
-                        data = d
-                except Exception:
-                    app.logger.exception("transport profile failed")
-            if data is None:
-                if not _sample_ok(puuid, bool(params.get("demo"))):
-                    return {"error": "Couldn't load this player's match history from Riot."}
-                data = _remember_sample(sample_match.career(puuid))
+            data = _profile_payload(puuid, bool(params.get("demo")))
+            if data.get("error"):
+                return data
             out = dict(data)
 
             out["weapons"] = _current_weapons(puuid)
@@ -935,6 +949,8 @@ def _start_ws_bridge() -> None:
         board_provider=ws_state_provider, remote_controller=remote_controller)
     _COMMAND_ROUTER = router
     remote_controller.attach_router(router)
+    import autolaunch
+    autolaunch.REMOTE = remote_controller
 
     try:
         token = ws_server.start(board_provider=ws_state_provider, command_router=router,
@@ -976,6 +992,12 @@ if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
     discord_presence.maybe_start()
     sync.maybe_start()
+    try:
+        import autolaunch
+        if os.getenv("SCOUT_NO_BROWSER", "").strip() not in ("1", "true"):
+            autolaunch.ensure_running()
+    except Exception:
+        app.logger.exception("autolaunch watcher start failed")
 
     if not debug or os.getenv("WERKZEUG_RUN_MAIN") == "true":
         _start_ws_bridge()

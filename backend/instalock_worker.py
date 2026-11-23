@@ -44,6 +44,7 @@ class InstalockWorker:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._op = threading.RLock()
         self.state = {"running": False, "status": "idle", "message": "",
                       "agent": None, "mode": "lock", "side": None, "map": None}
 
@@ -76,31 +77,33 @@ class InstalockWorker:
                     "message": f"DRY-RUN: would {mode} {agent['name']} when agent "
                                f"select starts (ALLOW_LIVE_INSTALOCK=false)."}
         delay = max(MIN_DELAY_S, float(delay or 0)) + random.uniform(0, JITTER_S)
-        self.stop()
-        with self._lock:
-            stop = threading.Event()
-            self._stop.set()
-            self._stop = stop
-            self.state.update(running=True, status="waiting", agent=agent["name"],
-                              mode=mode, side=None, map=None,
-                              message="Armed — waiting for agent select…")
-            self._thread = threading.Thread(
-                target=self._loop,
-                args=(stop, agent, mode, delay, region, per_map_norm),
-                daemon=True)
-            self._thread.start()
+        with self._op:
+            self.stop()
+            with self._lock:
+                stop = threading.Event()
+                self._stop.set()
+                self._stop = stop
+                self.state.update(running=True, status="waiting", agent=agent["name"],
+                                  mode=mode, side=None, map=None,
+                                  message="Armed — waiting for agent select…")
+                self._thread = threading.Thread(
+                    target=self._loop,
+                    args=(stop, agent, mode, delay, region, per_map_norm),
+                    daemon=True)
+                self._thread.start()
         return {"ok": True, "running": True, "agent": agent["name"],
                 "status": "waiting", "perMap": per_map_norm}
 
     def stop(self) -> dict:
-        self._stop.set()
-        t = self._thread
-        if t and t.is_alive() and t is not threading.current_thread():
-            t.join(timeout=2.5)
-        if self.state.get("status") in ("waiting", "running"):
-            self.state.update(status="stopped", message="Stopped.")
-        self.state.update(running=False)
-        return {"ok": True, "running": False}
+        with self._op:
+            self._stop.set()
+            t = self._thread
+            if t and t.is_alive() and t is not threading.current_thread():
+                t.join(timeout=2.5)
+            if self.state.get("status") in ("waiting", "running"):
+                self.state.update(status="stopped", message="Stopped.")
+            self.state.update(running=False)
+            return {"ok": True, "running": False}
 
     def _update(self, stop: threading.Event, **kw) -> bool:
         with self._lock:
@@ -151,6 +154,8 @@ class InstalockWorker:
                         if stop.is_set():
                             break
                         r = auth.glz_post(f"/pregame/v1/matches/{mid}/select/{agent_id}")
+                        if stop.is_set():
+                            break
                         if mode == "lock" and r.status_code < 400:
                             r = auth.glz_post(f"/pregame/v1/matches/{mid}/lock/{agent_id}")
                         done.add(mid)

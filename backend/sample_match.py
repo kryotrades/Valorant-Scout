@@ -279,6 +279,7 @@ def match_detail(match_id: str, subject: str = None) -> dict:
             "kills": k, "deaths": d, "assists": a,
             "kd": round(k / d, 2) if d else float(k),
             "acs": rng.randint(120, 320),
+            "perf": rng.randint(110, 470), "trades": rng.randint(0, 5),
             "hsPct": rng.randint(12, 40),
             "rankTier": tier, "rank": rank["name"], "rankColor": rank["color"],
             "rankIcon": valapi.rank_icon(tier), "rr": rng.randint(0, 99),
@@ -287,7 +288,7 @@ def match_detail(match_id: str, subject: str = None) -> dict:
             "level": rng.randint(25, 430), "playerCard": valapi.player_card(rng.choice(_CARDS)),
             "isSubject": is_subject,
         })
-    players.sort(key=lambda x: -x["acs"])
+    players.sort(key=lambda x: -x["perf"])
     players[0]["isMatchMvp"] = True
     subject_team = next((p["team"] for p in players if p["isSubject"]), "Blue")
     next((p for p in players if p["team"] == subject_team), players[0])["isTeamMvp"] = True
@@ -304,6 +305,20 @@ def match_detail(match_id: str, subject: str = None) -> dict:
         "result": ("Victory" if blue_won else "Defeat") if subject else None,
         "players": players, "teamStats": team_stats,
     }
+
+def _demo_rounds(rng, won: int, total: int) -> list:
+    wins = [True] * won + [False] * (total - won)
+    rng.shuffle(wins)
+    out = []
+    for n, w in enumerate(wins, 1):
+        kills = rng.choice([0, 0, 1, 1, 1, 2, 2, 3, 4] if w else [0, 0, 0, 1, 1, 2])
+        out.append({"n": n, "won": w, "how": "Eliminated", "kills": kills,
+                    "died": (not w and rng.random() < 0.8) or rng.random() < 0.3,
+                    "firstBlood": kills > 0 and rng.random() < 0.25,
+                    "ceremony": rng.choice(["Clutch", "Flawless", "Thrifty"]) if w and rng.random() < 0.15 else None,
+                    "plant": False, "defuse": False})
+    return out
+
 
 def recap(seed: int = 7) -> dict:
     pass
@@ -325,6 +340,7 @@ def recap(seed: int = 7) -> dict:
         "you": you, "yourAvgKd": round(rng.uniform(0.8, 1.4), 2),
         "rrDelta": delta, "tierAfter": rng.randint(11, 24),
         "rrAfter": rng.randint(0, 99),
+        "rounds": _demo_rounds(rng, detail["scores"][you["team"]], sum(detail["scores"].values())),
         "at": int(time.time()), "demo": True,
     }
 
@@ -403,29 +419,27 @@ def performance(seed: int = 7, timezone_name: str | None = None,
     tier, rr = 15, 34
     points = []
     for i in range(16):
-        won = rng.random() < 0.58
+        match_id = f"demo-performance-{seed}-{i}"
+        detail = match_detail(match_id, subject=account_puuid or "demo-self")
+        player = next(p for p in detail["players"] if p["isSubject"])
+        won = detail["result"] == "Victory"
         delta = rng.randint(15, 26) if won else -rng.randint(12, 22)
         rr += delta
         if rr >= 100:
             tier, rr = min(27, tier + 1), rr - 100
         elif rr < 0:
             tier, rr = max(3, tier - 1), rr + 100
-        agent_name = rng.choice(_AGENT_NAMES)
-        agent = resolve_agent(agent_name) or {}
-        map_name = rng.choice(MAPS)
-        kills, deaths = rng.randint(12, 28), rng.randint(10, 22)
         points.append({
-            "matchId": f"demo-performance-{seed}-{i}",
+            "matchId": match_id,
             "ts": now - (15 - i) * 10800,
-            "map": map_name, "mode": "Competitive",
-            "result": "Victory" if won else "Defeat",
+            "map": detail["map"], "mode": detail["mode"],
+            "result": detail["result"],
             "resultExact": True, "delta": delta,
             "tier": tier, "rr": rr, "seasonId": "demo-current-act",
-            "agent": agent_name, "agentPortrait": agent.get("portrait"),
-            "agentColor": agent.get("color", "#8B978F"),
-            "kills": kills, "deaths": deaths, "assists": rng.randint(3, 12),
-            "kd": round(kills / deaths, 2), "acs": rng.randint(165, 315),
-            "hsPct": rng.randint(16, 38), "partySize": rng.choice([1, 1, 2, 3]),
+            **{key: player[key] for key in (
+                "agent", "agentPortrait", "agentColor", "kills", "deaths",
+                "assists", "kd", "acs", "hsPct")},
+            "partySize": rng.choice([1, 1, 2, 3]),
         })
 
     def summary(rows):
@@ -440,9 +454,10 @@ def performance(seed: int = 7, timezone_name: str | None = None,
 
     active_points = points[-4:]
     archive_points = points[4:10]
+    before_active = points[-len(active_points) - 1]
     active = {
         "id": "demo-session-active", "startedAt": active_points[0]["ts"],
-        "startTier": active_points[0]["tier"], "startRr": active_points[0]["rr"],
+        "startTier": before_active["tier"], "startRr": before_active["rr"],
         "points": active_points, "summary": summary(active_points),
         "baseline": {"winRate": 52},
     }

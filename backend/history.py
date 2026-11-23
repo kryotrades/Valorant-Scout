@@ -148,6 +148,7 @@ def _upsert_points(points: list[dict], point: dict, source: str) -> list[dict]:
                 continue
             if _quality(cleaned) >= _quality(existing) or merged.get(key) is None:
                 merged[key] = value
+        merged["ts"] = min(t for t in (existing.get("ts"), cleaned["ts"]) if t)
         existing.clear()
         existing.update(merged)
     deduped = {p.get("matchId"): p for p in points if p.get("matchId") and p.get("ts")}
@@ -165,6 +166,10 @@ def _ensure_account(puuid: str, riot_id: str | None = None,
     account["lastSeenAt"] = int(time.time())
 
     return account
+
+
+def _still_saved(puuid: str, account: dict) -> bool:
+    return _STORE.get("accounts", {}).get(puuid) is account
 
 
 def record(point: dict, puuid: str | None = None, riot_id: str | None = None,
@@ -203,11 +208,33 @@ def saved_accounts() -> list[dict]:
     return sorted(rows, key=lambda row: row["lastSeenAt"], reverse=True)
 
 
+def forget_account(puuid: str, current: str | None) -> dict:
+    if not puuid:
+        return {"ok": False, "message": "No account given."}
+    if puuid == current:
+        return {"ok": False, "message": "You can't delete the account you're signed in to."}
+    with _LOCK:
+        if _STORE.get("accounts", {}).pop(puuid, None) is None:
+            return {"ok": False, "message": "That account isn't saved."}
+        _refresh_at.pop(puuid, None)
+        _enrich_at.pop(puuid, None)
+        _save()
+    return {"ok": True, "message": "Saved account deleted."}
+
+
+_ENRICH_TRIES = 3
+
+
+def _needs_details(p: dict) -> bool:
+    return ((p.get("acs") is None or p.get("scores") is None or p.get("partySize") is None)
+            and p.get("enrichTries", 0) < _ENRICH_TRIES)
+
+
 def refresh_due(puuid: str) -> bool:
     with _LOCK:
         now = time.time()
-        points = (_STORE.get("accounts", {}).get(puuid) or {}).get("points", [])[-20:]
-        missing = any(p.get("acs") is None or p.get("scores") is None or p.get("partySize") is None for p in points)
+        points = [p for p in (_STORE.get("accounts", {}).get(puuid) or {}).get("points", []) if p.get("matchId") and _needs_details(p)][-20:]
+        missing = bool(points)
         return (now - _refresh_at.get(puuid, 0) >= _REFRESH_TTL or
                 (missing and now - _enrich_at.get(puuid, 0) >= _REFRESH_TTL))
 
@@ -252,7 +279,9 @@ def refresh(auth, timezone_name: str | None = None) -> str | None:
             if len(page) < 20:
                 break
         with _LOCK:
-            account = _ensure_account(puuid, timezone_name=timezone_name)
+            if not _still_saved(puuid, account):
+                return puuid
+            _ensure_account(puuid, timezone_name=timezone_name)
             points = account.get("points", [])
             for match in matches:
                 delta = match.get("RankedRatingEarned")
@@ -281,8 +310,10 @@ def refresh(auth, timezone_name: str | None = None) -> str | None:
             _save()
     except Exception:
         with _LOCK:
+            if not _still_saved(puuid, account):
+                return puuid
             _refresh_at.pop(puuid, None)
-            account = _ensure_account(puuid, timezone_name=timezone_name)
+            _ensure_account(puuid, timezone_name=timezone_name)
             account["backfillError"] = True
             _save()
     return puuid
@@ -294,15 +325,13 @@ def enrich(live_match, puuid: str, limit: int = 20) -> int:
         return 0
     now = time.time()
     with _LOCK:
+        account = _STORE.get("accounts", {}).get(puuid)
+        if account is None:
+            return 0
         if now - _enrich_at.get(puuid, 0) < _REFRESH_TTL:
-            account = _ensure_account(puuid)
             return sum(p.get("acs") is not None for p in account.get("points", [])[-limit:])
         _enrich_at[puuid] = now
-        account = _ensure_account(puuid)
-        candidates = [p for p in account.get("points", [])[-limit:]
-                      if p.get("matchId") and (p.get("acs") is None
-                                               or p.get("scores") is None
-                                               or p.get("partySize") is None)]
+        candidates = [p for p in account.get("points", []) if p.get("matchId") and _needs_details(p)][-limit:]
         if not candidates:
             _enrich_at.pop(puuid, None)
             return sum(p.get("acs") is not None for p in account.get("points", [])[-limit:])
@@ -311,16 +340,20 @@ def enrich(live_match, puuid: str, limit: int = 20) -> int:
         try:
             detail = live_match.auth.pd_get(f"/match-details/v1/matches/{point['matchId']}")
             row = live_match._career_match(detail, puuid, point["matchId"])
-            return row
+            return row, isinstance(detail, dict) and ("matchInfo" in detail or detail.get("httpStatus") == 404)
         except Exception:
-            return None
+            return None, False
 
-    rows = []
-    if candidates:
-        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
-            rows = [row for row in pool.map(fetch, candidates) if row]
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+        results = list(pool.map(fetch, candidates))
+    rows = [row for row, _ in results if row]
+    definitive = {p["matchId"] for p, (_, ok) in zip(candidates, results) if ok}
+    with _LOCK:
+        if not _still_saved(puuid, account):
+            return 0
+        _ensure_account(puuid)
         for row in rows:
-            record({
+            account["points"] = _upsert_points(account.get("points", []), {
                 "matchId": row.get("matchId"),
                 "ts": int((row.get("startMillis") or 0) / 1000)
                       or next((p.get("ts") for p in candidates if p.get("matchId") == row.get("matchId")), None),
@@ -331,10 +364,14 @@ def enrich(live_match, puuid: str, limit: int = 20) -> int:
                 "assists": row.get("assists"), "kd": row.get("kd"),
                 "acs": row.get("acs"), "hsPct": row.get("hsPct"),
                 "partySize": row.get("partySize"), "scores": row.get("scores"),
-            }, puuid=puuid, source="live")
-    with _LOCK:
-        account = _ensure_account(puuid)
-        if candidates and not rows:
+            }, "live")
+        for p in candidates:
+            if _needs_details(p):
+                if p["matchId"] in definitive:
+                    p["enrichTries"] = p.get("enrichTries", 0) + 1
+            else:
+                p.pop("enrichTries", None)
+        if not rows:
             _enrich_at.pop(puuid, None)
             account["enrichError"] = True
         else:
@@ -451,8 +488,12 @@ def _insights(points: list[dict], timezone_name: str | None = None) -> list[dict
     return out[:6]
 
 
+def _competitive(point: dict) -> bool:
+    return str(point.get("mode") or "competitive").lower() == "competitive"
+
+
 def _summary(points: list[dict]) -> dict:
-    rated = [p for p in points if p.get("result") in ("Victory", "Defeat")]
+    rated = [p for p in points if p.get("result") in ("Victory", "Defeat") and _competitive(p)]
     wins, losses = _wl(rated)
     latest = next((p for p in reversed(points) if p.get("tier") is not None and p.get("rr") is not None), None)
     current = rank_from_tier(latest.get("tier") if latest else 0)
@@ -567,7 +608,7 @@ def payload(puuid: str | None = None, timezone_name: str | None = None) -> dict:
         account = (_STORE.get("accounts", {}).get(puuid) or {}) if puuid else {}
         points = [dict(p) for p in account.get("points", [])]
         if not timezone_name:
-            zone_name, _ = _valid_timezone(account.get("timezone"))
+            zone_name, zone = _valid_timezone(account.get("timezone"))
         account_info = {
             "puuid": puuid,
             "riotId": account.get("riotId"),

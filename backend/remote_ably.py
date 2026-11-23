@@ -19,7 +19,9 @@ except Exception:
 def _log(msg: str) -> None:
     print(f"[remote] {msg}", flush=True)
 
-_CONNECT_TIMEOUT = 10.0
+_CONNECT_TIMEOUT = 12.0
+_TOKEN_TIMEOUT = (3.0, 6.0)
+_ENDED_TIMEOUT = 2.0
 _PUBLISH_ERR_EVERY = 30.0
 _last_publish_err = 0.0
 
@@ -90,7 +92,7 @@ class RemoteController:
     def _fetch_token(self, session_id: str, role: str) -> dict:
         url = (f"{self.token_endpoint}?sessionId={quote(session_id, safe='')}"
                f"&role={role}")
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=_TOKEN_TIMEOUT)
         if r.status_code == 501:
             raise RemoteConfigError(
                 "Remote mode is not configured. Set ABLY_API_KEY in the "
@@ -117,6 +119,7 @@ class RemoteController:
                 return {"ok": False, "message": "Remote command router not ready."}
 
             session_id = secrets.token_urlsafe(32)
+            deadline = time.monotonic() + _CONNECT_TIMEOUT
             try:
                 phone_details = self._fetch_token(session_id, "phone")
             except RemoteConfigError as e:
@@ -124,6 +127,8 @@ class RemoteController:
             except Exception as e:
                 return {"ok": False,
                         "message": f"Couldn't reach the Ably token endpoint: {e}"}
+            if deadline - time.monotonic() < 0.1:
+                return {"ok": False, "message": "Ably connect failed: token endpoint too slow"}
 
             phone_token = phone_details["token"]
             remote_url = (f"{self.frontend_url}/remote/{session_id}"
@@ -149,7 +154,7 @@ class RemoteController:
             self._session = sess
             t.start()
 
-            if not ready.wait(timeout=_CONNECT_TIMEOUT) or sess["err"].get("error"):
+            if not ready.wait(timeout=deadline - time.monotonic()) or sess["err"].get("error"):
                 msg = sess["err"].get("error") or "timed out connecting"
                 self._teardown_locked()
                 return {"ok": False, "message": f"Ably connect failed: {msg}"}
@@ -187,10 +192,13 @@ class RemoteController:
 
     def shutdown(self) -> None:
         pass
+        sess = self._session
         try:
             self.disable()
         except Exception:
             pass
+        if sess and sess.get("thread"):
+            sess["thread"].join(_ENDED_TIMEOUT + 1)
 
     def publish_state(self, board: dict) -> None:
         sess = self._session
@@ -310,11 +318,19 @@ class RemoteController:
 
         idle_task = asyncio.ensure_future(idle_watch())
         pump_task = asyncio.ensure_future(state_pump())
+        clean = False
         try:
             await stop.wait()
+            clean = True
         finally:
             idle_task.cancel()
             pump_task.cancel()
+            if clean:
+                try:
+                    await asyncio.wait_for(ack_ch.publish("ended", {"reason": "stopped"}),
+                                           timeout=_ENDED_TIMEOUT)
+                except Exception:
+                    pass
             try:
                 await client.close()
             except Exception:

@@ -16,13 +16,18 @@ _SYNC_URL = os.getenv("SCOUT_SYNC_URL", "https://valorantscout.com/api/sync")
 _INTERVAL = 60
 _worker: "_Worker | None" = None
 
-_LATEST = {"state": None, "name": None, "rank": None, "rankTier": None, "at": 0.0}
+_LATEST = {"state": None, "name": None, "rank": None, "rankTier": None, "at": 0.0, "puuid": None, "acct": 0}
 
 def observe(board: dict) -> None:
     pass
     try:
         _LATEST["state"] = board.get("state")
         _LATEST["at"] = time.time()
+        pid = board.get("selfPuuid")
+        if pid and pid != _LATEST["puuid"]:
+            if _LATEST["puuid"]:
+                _LATEST.update(name=None, rank=None, rankTier=None, acct=_LATEST["acct"] + 1)
+            _LATEST["puuid"] = pid
         me = next((p for p in board.get("players", []) if p.get("isSelf")), None)
         if me and me.get("name") and "#" in str(me.get("name")):
             _LATEST["name"] = me["name"]
@@ -70,13 +75,16 @@ class _Worker:
         self.region: str | None = None
         self.level: int | None = None
         self.os = f"{platform.system()} {platform.release()}"
+        self.acct = _LATEST["acct"]
 
     def start(self):
         t = threading.Thread(target=self._run, name="ScoutSync", daemon=True)
         t.start()
 
     def _fill_identity(self):
-
+        if self.acct != _LATEST["acct"]:
+            self.acct = _LATEST["acct"]
+            self.name = self.region = self.level = None
         try:
             discord_presence.probe_discord_identity()
         except Exception:

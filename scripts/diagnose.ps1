@@ -58,16 +58,11 @@ elseif ($Root -match '\\Downloads\\') { $cat = "Downloads" }
 elseif ($Root -match '\.zip[\\/]|\\Temp1_') { $cat = "INSIDE A ZIP (must extract first)" }
 DiagLine "path category: $cat$(if ($special) { ' (' + ($special -join ', ') + ')' })"
 if ($cat -like "INSIDE*") { Bad "running from inside a ZIP" }
-try {
-    $t = Join-Path $Root (".vs-diag-" + [Guid]::NewGuid().ToString("N"))
-    [System.IO.File]::WriteAllText($t, "x"); Remove-Item $t -Force
-    Good "install folder writable"
-} catch { Bad "install folder NOT writable" }
-try {
-    $t = Join-Path $env:TEMP (".vs-diag-" + [Guid]::NewGuid().ToString("N"))
-    [System.IO.File]::WriteAllText($t, "x"); Remove-Item $t -Force
-    Good "TEMP writable"
-} catch { Bad "TEMP NOT writable" }
+
+$err = Get-WriteError $Root
+if ($err) { Bad "install folder NOT writable ($err)" } else { Good "install folder writable" }
+$err = Get-WriteError $env:TEMP
+if ($err) { Bad "TEMP NOT writable ($err)" } else { Good "TEMP writable" }
 try {
     $drive = (Get-Item $Root).PSDrive
     DiagLine ("free disk space: {0:N1} GB" -f ($drive.Free / 1GB))

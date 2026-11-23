@@ -10,10 +10,11 @@ import time
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _PATH = os.path.join(_DATA_DIR, "encounters.json")
 _LOCK = threading.RLock()
+_TIMELINE_MAX = 40
 
 
 def _empty_store() -> dict:
-    return {"version": 2, "accounts": {}, "discardedLegacyPlayers": 0}
+    return {"version": 2, "teammateStats": 2, "accounts": {}, "discardedLegacyPlayers": 0}
 
 
 def _load() -> dict:
@@ -21,6 +22,12 @@ def _load() -> dict:
         with open(_PATH, encoding="utf-8") as fh:
             raw = json.load(fh)
         if isinstance(raw, dict) and raw.get("version") == 2 and isinstance(raw.get("accounts"), dict):
+            if raw.get("teammateStats") != 2:
+                for account in raw["accounts"].values():
+                    for entry in ((account or {}).get("players") or {}).values():
+                        for key in ("withStats", "againstStats", "withStatMatchIds", "againstStatMatchIds"):
+                            entry.pop(key, None)
+                raw["teammateStats"] = 2
             return raw
         out = _empty_store()
         if isinstance(raw, dict):
@@ -203,7 +210,7 @@ def record_result(board: dict | None, won: bool | None) -> None:
                              "side": "with" if same_team else "against",
                              "result": "win" if won else "loss",
                              "agent": player.get("agent")})
-            entry["timeline"] = timeline[-20:]
+            entry["timeline"] = timeline[-_TIMELINE_MAX:]
             changed = True
         if changed:
             _save()
@@ -281,7 +288,7 @@ def backfill_career(owner: str | None, matches: list[dict] | None) -> int:
                         entry.setdefault("agentColors", {})[agent] = player["agentColor"]
 
                 stat_ids = entry.setdefault(f"{side}StatMatchIds", [])
-                if match_id not in stat_ids:
+                if match_id not in stat_ids and match.get("roundBased", True):
                     stats = entry.setdefault(f"{side}Stats", {})
                     stats["games"] = int(stats.get("games") or 0) + 1
                     for key in ("kills", "deaths", "assists", "shotsHit", "headshots"):
@@ -296,7 +303,7 @@ def backfill_career(owner: str | None, matches: list[dict] | None) -> int:
                 item.update({"at": seen_at, "side": side,
                              "result": "win" if result == "Victory" else "loss" if result == "Defeat" else None,
                              "agent": agent, "map": match.get("map")})
-                entry["timeline"] = sorted(timeline, key=lambda item: item.get("at") or 0)[-40:]
+                entry["timeline"] = sorted(timeline, key=lambda item: item.get("at") or 0)[-_TIMELINE_MAX:]
         _save()
     return changed
 
@@ -328,6 +335,12 @@ def get_all(owner: str | None, limit: int = 200) -> list[dict]:
     return entries[:limit] if limit is not None and limit >= 0 else entries
 
 
+def forget(owner: str) -> None:
+    with _LOCK:
+        if _STORE.get("accounts", {}).pop(str(owner), None) is not None:
+            _save()
+
+
 def account_count() -> int:
     with _LOCK:
         return sum(1 for account in _STORE.get("accounts", {}).values()
@@ -357,7 +370,7 @@ def get_all_accounts(current_owner: str | None = None, limit: int = 200) -> list
                                                     (source.get("agents") or [])))[-8:]
                 row["timeline"] = sorted((row.get("timeline") or []) +
                                          (source.get("timeline") or []),
-                                         key=lambda item: item.get("at") or 0)[-40:]
+                                         key=lambda item: item.get("at") or 0)[-_TIMELINE_MAX:]
                 for side in ("with", "against"):
                     source_stats = source.get(f"{side}Stats") or {}
                     stats = row.setdefault(f"{side}Stats", {})

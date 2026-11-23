@@ -18,11 +18,13 @@ ALLOWED_COMMANDS = {
     "launch_offline",
     "offline_status",
     "offline_toggle",
+    "autolaunch",
     "reset_session",
     "start_session",
     "end_session",
     "delete_session",
     "update_match_meta",
+    "forget_account",
 }
 
 ACK_FIELDS = (
@@ -31,6 +33,7 @@ ACK_FIELDS = (
     "queue", "queueId", "inQueue",
     "running", "active", "enabled", "connected", "friendsLoaded",
     "session", "sessions", "sessionId", "meta", "matchId", "deprecated",
+    "hideWindow",
 )
 
 RATE_LIMIT = 5
@@ -89,10 +92,12 @@ class CommandRouter:
         with self._lock:
             if command not in ALLOWED_COMMANDS:
                 return {"ok": False, "message": f"Unknown command '{command}'."}
-            if self._is_duplicate(client_id, command_id):
+            is_stop = command == "disable_remote" or (command == "instalock" and str(payload.get("action") or "").lower() == "stop") or (command == "autolaunch" and bool(payload.get("quit")))
+            is_poll = command == "offline_status" or (command == "autolaunch" and not payload)
+            if not is_stop and self._is_duplicate(client_id, command_id):
                 return {"ok": False, "dedup": True,
                         "message": "Duplicate command ignored."}
-            if not self._rate_ok(client_id):
+            if not (is_stop or is_poll) and not self._rate_ok(client_id):
                 return {"ok": False, "rateLimited": True,
                         "message": "Rate limit exceeded — max 5 commands / 10s."}
 
@@ -119,6 +124,9 @@ class CommandRouter:
                 return self._offline_status(payload)
             if command == "offline_toggle":
                 return self._offline_toggle(payload)
+            if command == "autolaunch":
+                import autolaunch
+                return autolaunch.apply(payload)
             if command == "reset_session":
                 return self._reset_session(payload)
             if command == "start_session":
@@ -129,6 +137,9 @@ class CommandRouter:
                 return self._delete_session(payload)
             if command == "update_match_meta":
                 return self._update_match_meta(payload)
+            if command == "forget_account":
+                import session_tracker
+                return session_tracker.forget_account(str(payload.get("puuid") or "").strip(), self._owner())
         except Exception as e:
             return {"ok": False, "message": f"Command failed: {e}"}
         return {"ok": False, "message": f"Unhandled command '{command}'."}
@@ -200,13 +211,14 @@ class CommandRouter:
 
     def _check_side(self, _payload: dict) -> dict:
         board = self.board_provider() or {}
-        side = board.get("side")
+        import live_match
+        side = live_match.current_side(board.get("side"), (board.get("score") or {}).get("round"), board.get("mode"))
         mapn = board.get("map")
         if side:
             return {"ok": True, "side": side, "map": mapn,
                     "message": f"You are {side}" + (f" on {mapn}" if mapn else "") + "."}
         return {"ok": True, "side": None, "map": mapn,
-                "message": "Not in agent select / a match."}
+                "message": "No sides in this mode." if live_match.NO_SIDE_MODES.search(board.get("mode") or "") else "Not in agent select / a match."}
 
     def _launch_offline(self, payload: dict) -> dict:
         import offline_launch
