@@ -5,16 +5,18 @@ import json
 import os
 import random
 import threading
+import time
 
 from agents import resolve_agent
 from riot_client import LocalAuth, chat_presences
 from vconstants import map_name_from_path
 
 MIN_DELAY_S = 4.0
-JITTER_S = 1.5
+JITTER_S = 0.3
+POLL_S = 0.25
+MATCH_FOUND = "MATCHMADE_GAME_STARTING"
 
-def _self_session_state(presences: list, puuid: str) -> str | None:
-    pass
+def _self_states(presences: list, puuid: str) -> tuple[str | None, str | None]:
     for p in presences or []:
         if p.get("puuid") != puuid:
             continue
@@ -22,15 +24,15 @@ def _self_session_state(presences: list, puuid: str) -> str | None:
             continue
         priv = p.get("private")
         if not priv or "{" in str(priv):
-            return None
+            return None, None
         try:
             data = json.loads(base64.b64decode(str(priv)).decode("utf-8"))
         except Exception:
-            return None
-        if "matchPresenceData" in data:
-            return data["matchPresenceData"].get("sessionLoopState")
-        return data.get("sessionLoopState")
-    return None
+            return None, None
+        match = data.get("matchPresenceData") or data
+        party = data.get("partyPresenceData") or data
+        return match.get("sessionLoopState"), party.get("partyState")
+    return None, None
 
 def _side_from_match(match: dict, puuid: str) -> str | None:
     ally = (match or {}).get("AllyTeam") or {}
@@ -123,16 +125,25 @@ class InstalockWorker:
                          message=f"Couldn't reach the local client: {e}")
             return
 
+        found_at = None
         while not stop.is_set():
             try:
                 presences = chat_presences(auth)
-                st = _self_session_state(presences, auth.puuid)
+                st, party = _self_states(presences, auth.puuid)
+                if (st == "MENUS" and party == MATCH_FOUND) or st == "PREGAME":
+                    if found_at is None:
+                        found_at = time.monotonic()
+                        auth.headers(refresh=True)
+                        self._update(stop, message="Match found — waiting for agent select…")
+                elif st == "MENUS" and found_at is not None:
+                    found_at = None
+                    self._update(stop, message="Armed — waiting for agent select…")
                 if st == "PREGAME":
-                    auth.headers(refresh=True)
                     pg = auth.glz_get(f"/pregame/v1/players/{auth.puuid}")
                     mid = pg.get("MatchID") if isinstance(pg, dict) else None
                     if mid and mid not in done:
-                        if delay > 0 and stop.wait(delay):
+                        wait = found_at + delay - time.monotonic()
+                        if wait > 0 and stop.wait(wait):
                             break
                         match = auth.glz_get(f"/pregame/v1/matches/{mid}")
                         tries = 0
@@ -180,7 +191,7 @@ class InstalockWorker:
                     self._update(stop, running=False, status="error",
                                  message="Local client not reachable — is VALORANT open?")
                     return
-                if stop.wait(1.0):
+                if stop.wait(POLL_S):
                     break
             except Exception:
                 try:
